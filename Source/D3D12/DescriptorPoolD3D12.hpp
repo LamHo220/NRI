@@ -27,8 +27,20 @@ Result DescriptorPoolD3D12::Create(const DescriptorPoolDesc& descriptorPoolDesc)
             NRI_RETURN_ON_BAD_HRESULT(&m_Device, hr, "ID3D12Device::CreateDescriptorHeap");
 
             descriptorHeapDesc.heap = descriptorHeap;
+#if defined(_MVC_VER) || !defined(_WIN32)
             descriptorHeapDesc.baseHandleCPU = descriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr;
+#else
+            D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle;
+            descriptorHeap->GetCPUDescriptorHandleForHeapStart(&cpuHandle);
+            descriptorHeapDesc.baseHandleCPU = cpuHandle.ptr;
+#endif
+#if defined(_MVC_VER) || !defined(_WIN32)
             descriptorHeapDesc.baseHandleGPU = descriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr;
+#else
+            D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle;
+            descriptorHeap->GetGPUDescriptorHandleForHeapStart(&gpuHandle);
+            descriptorHeapDesc.baseHandleGPU = gpuHandle.ptr;
+#endif
             descriptorHeapDesc.descriptorSize = m_Device->GetDescriptorHandleIncrementSize((D3D12_DESCRIPTOR_HEAP_TYPE)i);
 
             m_DescriptorHeaps[m_DescriptorHeapNum++] = descriptorHeap;
@@ -55,10 +67,27 @@ Result DescriptorPoolD3D12::Create(const DescriptorPoolD3D12Desc& descriptorPool
 
         descriptorHeapDesc = {};
         if (descriptorHeaps[i]) {
+#if defined(_MVC_VER) || !defined(_WIN32)
             D3D12_DESCRIPTOR_HEAP_DESC desc = descriptorHeaps[i]->GetDesc();
+#else
+            D3D12_DESCRIPTOR_HEAP_DESC desc;
+            descriptorHeaps[i]->GetDesc(&desc);
+#endif
             descriptorHeapDesc.heap = descriptorHeaps[i];
+#if defined(_MVC_VER) || !defined(_WIN32)
             descriptorHeapDesc.baseHandleCPU = descriptorHeaps[i]->GetCPUDescriptorHandleForHeapStart().ptr;
+#else
+            D3D12_CPU_DESCRIPTOR_HANDLE cpuDescHandle;
+            descriptorHeaps[i]->GetCPUDescriptorHandleForHeapStart(&cpuDescHandle);
+            descriptorHeapDesc.baseHandleCPU = cpuDescHandle.ptr;
+#endif
+#if defined(_MVC_VER) || !defined(_WIN32)
             descriptorHeapDesc.baseHandleGPU = descriptorHeaps[i]->GetGPUDescriptorHandleForHeapStart().ptr;
+#else
+            D3D12_GPU_DESCRIPTOR_HANDLE gpuDescHandle;
+            descriptorHeaps[i]->GetGPUDescriptorHandleForHeapStart(&gpuDescHandle);
+            descriptorHeapDesc.baseHandleGPU = gpuDescHandle.ptr;
+#endif
             descriptorHeapDesc.descriptorSize = m_Device->GetDescriptorHandleIncrementSize(desc.Type);
 
             m_DescriptorHeaps[m_DescriptorHeapNum++] = descriptorHeaps[i];

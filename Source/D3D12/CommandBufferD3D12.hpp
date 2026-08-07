@@ -595,10 +595,20 @@ NRI_INLINE void CommandBufferD3D12::EndRendering() {
 #endif
         {
             const TexViewDesc& srcDesc = resolveSrc->GetTexViewDesc();
+#if defined(_MVC_VER) || !defined(_WIN32)
             D3D12_RESOURCE_DESC srcResourceDesc = resolveSrc->GetResource()->GetDesc();
+#else
+            D3D12_RESOURCE_DESC srcResourceDesc;
+            resolveSrc->GetResource()->GetDesc(&srcResourceDesc);
+#endif
 
             const TexViewDesc& dstDesc = resolveDst->GetTexViewDesc();
+#if defined(_MVC_VER) || !defined(_WIN32)
             D3D12_RESOURCE_DESC dstResourceDesc = resolveDst->GetResource()->GetDesc();
+#else
+            D3D12_RESOURCE_DESC dstResourceDesc;
+            resolveDst->GetResource()->GetDesc(&dstResourceDesc);
+#endif
 
             for (uint32_t layer = 0; layer < srcDesc.layerNum; layer++) {
                 uint32_t srcSubresource = GetSubresourceIndex(srcDesc.layerOffset + layer, srcResourceDesc.DepthOrArraySize, srcDesc.mipOffset, srcResourceDesc.MipLevels, planeBits);
@@ -639,12 +649,22 @@ NRI_INLINE void CommandBufferD3D12::EndRendering() {
             const DxgiFormat& format = GetDxgiFormat(attachmentDesc->resolveDst->GetFormat());
 
             ID3D12Resource* srcResource = attachmentDesc->attachment->GetResource();
+#if defined(_MVC_VER) || !defined(_WIN32)
             D3D12_RESOURCE_DESC srcResourceDesc = srcResource->GetDesc();
+#else
+            D3D12_RESOURCE_DESC srcResourceDesc;
+            srcResource->GetDesc(&srcResourceDesc);
+#endif
             const TexViewDesc& srcDesc = attachmentDesc->attachment->GetTexViewDesc();
             uint32_t srcSubresource = GetSubresourceIndex(srcDesc.layerOffset, srcResourceDesc.DepthOrArraySize, srcDesc.mipOffset, srcResourceDesc.MipLevels, planeBits);
 
             ID3D12Resource* dstResource = attachmentDesc->resolveDst->GetResource();
+#if defined(_MVC_VER) || !defined(_WIN32)
             D3D12_RESOURCE_DESC dstResourceDesc = dstResource->GetDesc();
+#else
+            D3D12_RESOURCE_DESC dstResourceDesc;
+            dstResource->GetDesc(&dstResourceDesc);
+#endif
             const TexViewDesc& dstDesc = attachmentDesc->resolveDst->GetTexViewDesc();
             uint32_t dstSubresource = GetSubresourceIndex(dstDesc.layerOffset, dstResourceDesc.DepthOrArraySize, dstDesc.mipOffset, dstResourceDesc.DepthOrArraySize, planeBits);
 
@@ -850,7 +870,12 @@ NRI_INLINE void CommandBufferD3D12::CopyTexture(Texture& dstTexture, const Textu
 NRI_INLINE void CommandBufferD3D12::ZeroBuffer(Buffer& buffer, uint64_t offset, uint64_t size) {
     const BufferD3D12& dst = (BufferD3D12&)buffer;
     ID3D12Resource* zeroBuffer = m_Device.GetZeroBuffer();
+#if defined(_MVC_VER) || !defined(_WIN32)
     D3D12_RESOURCE_DESC zeroBufferDesc = zeroBuffer->GetDesc();
+#else
+    D3D12_RESOURCE_DESC zeroBufferDesc;
+    zeroBuffer->GetDesc(&zeroBufferDesc);
+#endif
 
     if (size == WHOLE_SIZE)
         size = dst.GetDesc().size;

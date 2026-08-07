@@ -272,7 +272,7 @@ Result DeviceD3D12::Create(const DeviceCreationDesc& desc, const DeviceCreationD
                 D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
                 D3D12_MESSAGE_ID_CREATEPIPELINELIBRARY_INVALIDLIBRARYBLOB,
 #if NRI_ENABLE_AGILITY_SDK_SUPPORT
-                // All good
+            // All good
 #else
                 // Descriptor validation doesn't understand acceleration structures used outside of RAYGEN shaders
                 D3D12_MESSAGE_ID_COMMAND_LIST_STATIC_DESCRIPTOR_RESOURCE_DIMENSION_MISMATCH,
@@ -508,7 +508,7 @@ void DeviceD3D12::FillDesc(bool disableD3D12EnhancedBarrier) {
         NRI_REPORT_WARNING(this, "ID3D12Device::CheckFeatureSupport(options12) failed, result = 0x%08X!", hr);
     m_Desc.features.enhancedBarriers = options12.EnhancedBarriersSupported && !disableD3D12EnhancedBarrier;
 
-    //Agility 1.606
+    // Agility 1.606
     D3D12_FEATURE_DATA_D3D12_OPTIONS13 options13 = {};
     hr = m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS13, &options13, sizeof(options13));
     if (FAILED(hr))
@@ -1036,7 +1036,13 @@ Result DeviceD3D12::GetDescriptorHandle(D3D12_DESCRIPTOR_HEAP_TYPE type, Descrip
 
         DescriptorHeapDesc descriptorHeapDesc = {};
         descriptorHeapDesc.heap = descriptorHeap;
+#if defined(_MVC_VER) || !defined(_WIN32)
         descriptorHeapDesc.baseHandleCPU = descriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr;
+#else
+        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+        descriptorHeap->GetCPUDescriptorHandleForHeapStart(&handle);
+        descriptorHeapDesc.baseHandleCPU = handle.ptr;
+#endif
         descriptorHeapDesc.descriptorSize = m_Device->GetDescriptorHandleIncrementSize(type);
         m_DescriptorHeaps.push_back(descriptorHeapDesc);
 
@@ -1283,7 +1289,12 @@ void DeviceD3D12::GetMemoryDesc(MemoryLocation memoryLocation, const D3D12_RESOU
     // Not "1" - "offset" is not needed (we always pass 1 resource, not an array)
     // Not "2" - "D3D12_RESOURCE_DESC1" is not in use
     // Not "3" - no castable formats
+#if defined(_MVC_VER) || !defined(_WIN32)
     D3D12_RESOURCE_ALLOCATION_INFO resourceAllocationInfo = m_Device->GetResourceAllocationInfo(NODE_MASK, 1, (D3D12_RESOURCE_DESC*)&resourceDesc);
+#else
+    D3D12_RESOURCE_ALLOCATION_INFO resourceAllocationInfo;
+    m_Device->GetResourceAllocationInfo(&resourceAllocationInfo, NODE_MASK, 1, (D3D12_RESOURCE_DESC*)&resourceDesc);
+#endif
     NRI_CHECK(resourceAllocationInfo.SizeInBytes != UINT64_MAX, "Invalid arg?");
 
     MemoryTypeInfo memoryTypeInfo = {};

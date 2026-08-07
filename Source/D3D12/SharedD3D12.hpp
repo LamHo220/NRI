@@ -35,7 +35,8 @@ constexpr std::array<D3D12_DESCRIPTOR_RANGE_TYPE, (size_t)DescriptorType::MAX_NU
     D3D12_DESCRIPTOR_RANGE_TYPE_UAV,     // STORAGE_STRUCTURED_BUFFER
     D3D12_DESCRIPTOR_RANGE_TYPE_SRV,     // ACCELERATION_STRUCTURE
 };
-//NRI_VALIDATE_ARRAY(g_DescriptorRangeTypes); // TODO: 0 is expected for ACCELERATION_STRUCTURE
+
+// NRI_VALIDATE_ARRAY(g_DescriptorRangeTypes); // TODO: 0 is expected for ACCELERATION_STRUCTURE
 
 D3D12_DESCRIPTOR_RANGE_TYPE nri::GetDescriptorRangesType(DescriptorType descriptorType) {
     return g_DescriptorRangeTypes[(size_t)descriptorType];
@@ -349,7 +350,13 @@ D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE nri::GetCopyMode(CopyMode copy
 }
 
 uint64_t nri::GetMemorySizeD3D12(const MemoryD3D12Desc& memoryD3D12Desc) {
+#if defined(_MVC_VER) || !defined(_WIN32)
     return memoryD3D12Desc.d3d12Heap->GetDesc().SizeInBytes;
+#else
+    D3D12_HEAP_DESC desc;
+    memoryD3D12Desc.d3d12Heap->GetDesc(&desc);
+    return desc.SizeInBytes;
+#endif
 }
 
 D3D12_RESIDENCY_PRIORITY nri::ConvertPriority(float priority) {
@@ -393,7 +400,12 @@ bool nri::GetTextureDesc(const TextureD3D12Desc& textureD3D12Desc, TextureDesc& 
     if (!resource)
         return false;
 
+#if defined(_MVC_VER) || !defined(_WIN32)
     D3D12_RESOURCE_DESC desc = resource->GetDesc();
+#else
+    D3D12_RESOURCE_DESC desc;
+    resource->GetDesc(&desc);
+#endif
     if (desc.Dimension < D3D12_RESOURCE_DIMENSION_TEXTURE1D)
         return false;
 
@@ -428,7 +440,12 @@ bool nri::GetBufferDesc(const BufferD3D12Desc& bufferD3D12Desc, BufferDesc& buff
     if (!resource)
         return false;
 
+#if defined(_MVC_VER) || !defined(_WIN32)
     D3D12_RESOURCE_DESC desc = resource->GetDesc();
+#else
+    D3D12_RESOURCE_DESC desc;
+    resource->GetDesc(&desc);
+#endif
     if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
         return false;
 
