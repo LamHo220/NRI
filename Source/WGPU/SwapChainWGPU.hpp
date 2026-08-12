@@ -108,11 +108,15 @@ Result SwapChainWGPU::Create(const SwapChainDesc& swapChainDesc) {
     WGPUSurfaceConfiguration desc = WGPU_SURFACE_CONFIGURATION_INIT;
     desc.device = m_Device;
     desc.format = format;
-    desc.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
+    desc.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
     desc.width = swapChainDesc.width;
     desc.height = swapChainDesc.height;
     desc.alphaMode = alphaMode;
     desc.presentMode = presentMode;
+
+    if (capabilities.usages & WGPUTextureUsage_TextureBinding) {
+        desc.usage |= WGPUTextureUsage_TextureBinding;
+    }
 
     wgpuSurfaceConfigure(m_Surface, &desc);
 
