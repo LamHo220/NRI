@@ -1153,3 +1153,7 @@ NRI_API void NRI_CALL nriReportLiveObjects() {
         pDebug->ReportLiveObjects(DXGI_DEBUG_ALL, (DXGI_DEBUG_RLO_FLAGS)((uint32_t)DXGI_DEBUG_RLO_DETAIL | (uint32_t)DXGI_DEBUG_RLO_IGNORE_INTERNAL));
 #endif
 }
+
+NRI_API Result NRI_CALL nriReportDeviceLostInfo(Device& device, DeviceLostDump& deviceLostDump) {
+    return ((DeviceBase&)device).ReportDeviceLostInfo(deviceLostDump);
+}

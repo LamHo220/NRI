@@ -104,6 +104,8 @@ struct FramebufferCacheEntry {
 
 struct IsSupported {
     uint32_t deviceAddress                : 1;
+    uint32_t deviceFault                  : 1;
+    uint32_t deviceFaultVendorBinary      : 1;
     uint32_t dynamicRendering             : 1;
     uint32_t copyCommands2                : 1;
     uint32_t swapChainMutableFormat       : 1;
@@ -232,6 +234,7 @@ struct DeviceVK final : public DeviceBase {
     }
 
     void Destruct() override;
+    Result ReportDeviceLostInfo(DeviceLostDump& deviceLostDump) override;
     Result FillFunctionTable(CoreInterface& table) const override;
     Result FillFunctionTable(HelperInterface& table) const override;
     Result FillFunctionTable(LowLatencyInterface& table) const override;
@@ -270,7 +273,7 @@ private:
     VkResult CreateVma();
     void FilterInstanceLayers(Vector<const char*>& layers);
     void ProcessInstanceExtensions(Vector<const char*>& desiredInstanceExts);
-    void ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, bool disableRayTracing);
+    void ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, bool disableRayTracing, DeviceLostInfoLevel deviceLostInfoLevel);
     void ReportMemoryTypes();
     Result CreateInstance(bool enableGraphicsAPIValidation, const Vector<const char*>& desiredInstanceExts);
     Result ResolvePreInstanceDispatchTable();
@@ -305,11 +308,14 @@ private:
     uint32_t m_NumActiveFamilyIndices = 0;
     uint32_t m_MinorVersion = 0;
     uint64_t m_NonCoherentAtomSize = 1;
+    DeviceLostDump m_DeviceLostDump = {};
     bool m_OwnsNativeObjects = true;
     bool m_IsMemoryZeroInitializationEnabled = false;
+    bool m_IsDeviceLostInfoReported = false;
 
     Lock m_Lock;
     Lock m_TransferContextLock;
+    Lock m_DeviceLostLock;
 };
 
 } // namespace nri

@@ -1190,7 +1190,10 @@ void UpscalerImpl::GetUpscalerProps(UpscalerProps& upscalerProps) const {
     upscalerProps.renderResolution.h = (Dim_t)(m_Desc.upscaleResolution.h / scalingFactor + 0.5f);
     upscalerProps.jitterPhaseNum = (uint8_t)std::ceil(8.0f * scalingFactor * scalingFactor);
 
-    if (m_Desc.mode == UpscalerMode::ULTRA_QUALITY || m_Desc.mode == UpscalerMode::QUALITY || m_Desc.mode == UpscalerMode::BALANCED) {
+    if (m_Desc.type == UpscalerType::NIS) {
+        upscalerProps.renderResolutionMin.w = 0;
+        upscalerProps.renderResolutionMin.h = 0;
+    } else if (m_Desc.mode == UpscalerMode::ULTRA_QUALITY || m_Desc.mode == UpscalerMode::QUALITY || m_Desc.mode == UpscalerMode::BALANCED) {
         upscalerProps.renderResolutionMin.w = m_Desc.upscaleResolution.w / 2;
         upscalerProps.renderResolutionMin.h = m_Desc.upscaleResolution.h / 2;
     } else

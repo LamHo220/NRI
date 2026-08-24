@@ -69,6 +69,12 @@ struct DeviceBase : public DebugNameBaseVal {
     virtual ~DeviceBase() {
     }
 
+    virtual Result ReportDeviceLostInfo(DeviceLostDump& deviceLostDump) {
+        deviceLostDump = {};
+
+        return Result::UNSUPPORTED;
+    }
+
     virtual Result FillFunctionTable(CoreInterface&) const {
         return Result::UNSUPPORTED;
     }

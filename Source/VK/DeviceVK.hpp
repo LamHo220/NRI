@@ -2,6 +2,27 @@
 
 constexpr bool VERBOSE = false;
 
+static inline const char* GetDeviceLostAddressTypeName(VkDeviceFaultAddressTypeEXT type) {
+    switch (type) {
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_NONE_EXT:
+            return "None";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT:
+            return "ReadInvalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT:
+            return "WriteInvalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT:
+            return "ExecuteInvalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT:
+            return "InstructionPointerUnknown";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT:
+            return "InstructionPointerInvalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT:
+            return "InstructionPointerFault";
+        default:
+            return "Unknown";
+    }
+}
+
 static inline uint32_t NextPow2(uint32_t n) {
     if (n <= 1)
         return 1;
@@ -324,7 +345,7 @@ void DeviceVK::ProcessInstanceExtensions(Vector<const char*>& desiredInstanceExt
         desiredInstanceExts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 }
 
-void DeviceVK::ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, bool disableRayTracing) {
+void DeviceVK::ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, bool disableRayTracing, DeviceLostInfoLevel deviceLostInfoLevel) {
     // Query extensions
     uint32_t extensionNum = 0;
     m_VK.EnumerateDeviceExtensionProperties(m_PhysicalDevice, nullptr, &extensionNum, nullptr);
@@ -366,6 +387,8 @@ void DeviceVK::ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, b
     APPEND_EXT(!disableRayTracing, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
     APPEND_EXT(!disableRayTracing, VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
     APPEND_EXT(!disableRayTracing, VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
+
+    APPEND_EXT(deviceLostInfoLevel != DeviceLostInfoLevel::NONE, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
 
     APPEND_EXT(true, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
     APPEND_EXT(true, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
@@ -423,6 +446,9 @@ DeviceVK::DeviceVK(const CallbackInterface& callbacks, const AllocationCallbacks
 }
 
 DeviceVK::~DeviceVK() {
+    if (m_DeviceLostDump.data)
+        GetAllocationCallbacks().Free(GetAllocationCallbacks().userArg, (void*)m_DeviceLostDump.data);
+
     for (TransferContextVK* context : m_TransferContexts)
         Destroy(context);
 
@@ -606,7 +632,7 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         desiredDeviceExts.push_back(desc.vkExtensions.deviceExtensions[i]);
 
     if (!isWrapper)
-        ProcessDeviceExtensions(desiredDeviceExts, desc.disableVKRayTracing);
+        ProcessDeviceExtensions(desiredDeviceExts, desc.disableVKRayTracing, desc.deviceLostInfoLevel);
 
     NRI_REPORT_INFO(this, "Using Vulkan v1.%u (%u device extensions initialized)", m_MinorVersion, (uint32_t)desiredDeviceExts.size());
 
@@ -674,6 +700,10 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
     PNEXTCHAIN_APPEND_FEATURES(true, EXT, ZeroInitializeDeviceMemory, ZERO_INITIALIZE_DEVICE_MEMORY);
     PNEXTCHAIN_APPEND_FEATURES(true, EXT, MutableDescriptorType, MUTABLE_DESCRIPTOR_TYPE);
 
+    VkPhysicalDeviceFaultFeaturesEXT DeviceFaultFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    if (desc.deviceLostInfoLevel != DeviceLostInfoLevel::NONE && IsExtensionSupported(VK_EXT_DEVICE_FAULT_EXTENSION_NAME, desiredDeviceExts))
+        PNEXTCHAIN_APPEND_STRUCT(DeviceFaultFeatures);
+
     m_VK.GetPhysicalDeviceFeatures2(m_PhysicalDevice, &features);
 
     if (m_MinorVersion < 3) {
@@ -725,6 +755,8 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
     m_IsSupported.fifoLatestReady = PresentModeFifoLatestReadyFeatures.presentModeFifoLatestReady;
     m_IsSupported.unifiedImageLayoutsVideo = UnifiedImageLayoutsFeatures.unifiedImageLayoutsVideo;
     m_IsSupported.hostImageCopy = features14.hostImageCopy;
+    m_IsSupported.deviceFault = DeviceFaultFeatures.deviceFault;
+    m_IsSupported.deviceFaultVendorBinary = DeviceFaultFeatures.deviceFaultVendorBinary;
 
     m_IsMemoryZeroInitializationEnabled = desc.enableMemoryZeroInitialization && ZeroInitializeDeviceMemoryFeatures.zeroInitializeDeviceMemory;
 
@@ -2022,6 +2054,9 @@ Result DeviceVK::ResolveDispatchTable(const Vector<const char*>& desiredDeviceEx
         GET_DEVICE_FUNC(GetCalibratedTimestampsEXT);
     }
 
+    if (IsExtensionSupported(VK_EXT_DEVICE_FAULT_EXTENSION_NAME, desiredDeviceExts))
+        GET_DEVICE_FUNC(GetDeviceFaultInfoEXT);
+
     if (IsExtensionSupported(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME, desiredDeviceExts)) {
         GET_DEVICE_FUNC(CreateMicromapEXT);
         GET_DEVICE_FUNC(DestroyMicromapEXT);
@@ -2057,6 +2092,106 @@ Result DeviceVK::ResolveDispatchTable(const Vector<const char*>& desiredDeviceEx
 #undef GET_DEVICE_CORE_FUNC
 #undef GET_DEVICE_FUNC
 #undef GET_INSTANCE_FUNC
+
+Result DeviceVK::ReportDeviceLostInfo(DeviceLostDump& deviceLostDump) {
+    deviceLostDump = {};
+
+    if (!m_IsSupported.deviceFault)
+        return Result::UNSUPPORTED;
+
+    ExclusiveScope lock(m_DeviceLostLock);
+
+    if (m_IsDeviceLostInfoReported) {
+        deviceLostDump = m_DeviceLostDump;
+
+        return Result::SUCCESS;
+    }
+
+    VkDeviceFaultCountsEXT faultCounts = {VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    VkResult vkResult = m_VK.GetDeviceFaultInfoEXT(m_Device, &faultCounts, nullptr);
+    if (vkResult < 0)
+        return GetResultFromVkResult(vkResult);
+
+    Scratch<VkDeviceFaultAddressInfoEXT> addressInfos = NRI_ALLOCATE_SCRATCH(*this, VkDeviceFaultAddressInfoEXT, faultCounts.addressInfoCount);
+    Scratch<VkDeviceFaultVendorInfoEXT> vendorInfos = NRI_ALLOCATE_SCRATCH(*this, VkDeviceFaultVendorInfoEXT, faultCounts.vendorInfoCount);
+    if ((faultCounts.addressInfoCount && !addressInfos) || (faultCounts.vendorInfoCount && !vendorInfos))
+        return Result::OUT_OF_MEMORY;
+
+    if (!m_IsSupported.deviceFaultVendorBinary)
+        faultCounts.vendorBinarySize = 0;
+
+    const AllocationCallbacks& allocationCallbacks = GetAllocationCallbacks();
+    uint8_t* deviceLostData = nullptr;
+    if (faultCounts.vendorBinarySize) {
+        deviceLostData = (uint8_t*)allocationCallbacks.Allocate(allocationCallbacks.userArg, (size_t)faultCounts.vendorBinarySize, alignof(uint8_t));
+        if (!deviceLostData) {
+            return Result::OUT_OF_MEMORY;
+        }
+    }
+
+    VkDeviceFaultInfoEXT faultInfo = {VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+    faultInfo.pAddressInfos = addressInfos;
+    faultInfo.pVendorInfos = vendorInfos;
+    faultInfo.pVendorBinaryData = deviceLostData;
+
+    vkResult = m_VK.GetDeviceFaultInfoEXT(m_Device, &faultCounts, &faultInfo);
+    if (vkResult < 0) {
+        if (deviceLostData)
+            allocationCallbacks.Free(allocationCallbacks.userArg, deviceLostData);
+
+        return GetResultFromVkResult(vkResult);
+    }
+
+    if (vkResult == VK_INCOMPLETE) {
+        if (deviceLostData)
+            allocationCallbacks.Free(allocationCallbacks.userArg, deviceLostData);
+
+        NRI_REPORT_WARNING(this, "Device lost data is incomplete");
+
+        return Result::FAILURE;
+    }
+
+    if (!faultCounts.vendorBinarySize && deviceLostData) {
+        allocationCallbacks.Free(allocationCallbacks.userArg, deviceLostData);
+        deviceLostData = nullptr;
+    }
+
+    m_DeviceLostDump = {deviceLostData, faultCounts.vendorBinarySize};
+    m_IsDeviceLostInfoReported = true;
+
+    deviceLostDump = m_DeviceLostDump;
+
+    NRI_REPORT_DEVICE_LOST_INFO(this,
+        "[DeviceLost] description=%s addressInfoCount=%u vendorInfoCount=%u",
+        faultInfo.description,
+        faultCounts.addressInfoCount,
+        faultCounts.vendorInfoCount);
+
+    for (uint32_t i = 0; i < faultCounts.addressInfoCount; i++) {
+        const VkDeviceFaultAddressInfoEXT& addressInfo = addressInfos[i];
+        NRI_REPORT_DEVICE_LOST_INFO(this,
+            "[DeviceLost]   Address[%u]: type=%s address=0x%016" PRIX64 " precision=0x%016" PRIX64,
+            i,
+            GetDeviceLostAddressTypeName(addressInfo.addressType),
+            addressInfo.reportedAddress,
+            addressInfo.addressPrecision);
+    }
+
+    for (uint32_t i = 0; i < faultCounts.vendorInfoCount; i++) {
+        const VkDeviceFaultVendorInfoEXT& vendorInfo = vendorInfos[i];
+        NRI_REPORT_DEVICE_LOST_INFO(this,
+            "[DeviceLost]   VendorInfo[%u]: code=0x%016" PRIX64 " data=0x%016" PRIX64 " description=%s",
+            i,
+            vendorInfo.vendorFaultCode,
+            vendorInfo.vendorFaultData,
+            vendorInfo.description);
+    }
+
+    if (faultCounts.vendorBinarySize)
+        NRI_REPORT_DEVICE_LOST_INFO(this, "[DeviceLost] vendorBinarySize=%" PRIu64, faultCounts.vendorBinarySize);
+
+    return Result::SUCCESS;
+}
 
 void DeviceVK::Destruct() {
     Destroy(GetAllocationCallbacks(), this);
