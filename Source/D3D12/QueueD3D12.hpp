@@ -19,7 +19,13 @@ Result QueueD3D12::Create(ID3D12CommandQueue* queue) {
     if (!queue)
         return Result::INVALID_ARGUMENT;
 
+#if defined(_MVC_VER) || !defined(_WIN32)
     const D3D12_COMMAND_QUEUE_DESC& queueDesc = queue->GetDesc();
+#else
+    D3D12_COMMAND_QUEUE_DESC tmp{};
+    queue->GetDesc(&tmp);
+    const D3D12_COMMAND_QUEUE_DESC& queueDesc = tmp;
+#endif
 
     m_Queue = queue;
     m_CommandListType = queueDesc.Type;

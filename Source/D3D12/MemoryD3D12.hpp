@@ -54,7 +54,11 @@ Result MemoryD3D12::Create(const AllocateMemoryDesc& allocateMemoryDesc) {
 Result MemoryD3D12::Create(const MemoryD3D12Desc& memoryD3D12Desc) {
     m_Heap = memoryD3D12Desc.d3d12Heap;
     m_Offset = memoryD3D12Desc.offset;
+#if defined(_MVC_VER) || !defined(_WIN32)
     m_HeapDesc = m_Heap->GetDesc();
+#else
+    m_Heap->GetDesc(&m_HeapDesc);
+#endif
 
     return Result::SUCCESS;
 }
