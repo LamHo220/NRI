@@ -22,7 +22,13 @@ static inline uint32_t GetPlaneIndex(PlaneBits planes) {
 
 static inline DXGI_FORMAT GetResourceFormat(const TextureD3D12& texture) {
     ID3D12ResourceBest* resource = texture;
+#if defined(_MVC_VER) || !defined(_WIN32)
     return resource->GetDesc().Format;
+#else
+    D3D12_RESOURCE_DESC desc;
+    resource->GetDesc(&desc);
+    return desc.Format;
+#endif
 }
 
 static inline uint32_t GetComponentSwizzle(ComponentSwizzle componentSwizzle, uint32_t channelIndex) {
