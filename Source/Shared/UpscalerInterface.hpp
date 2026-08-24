@@ -283,11 +283,8 @@ static void FfxDealloc(void* pUserData, void* pMem) {
 
 #    ifndef NDEBUG
 
-static void FfxDebugMessage(uint32_t, const wchar_t* message) {
-    char s[1024];
-    ConvertWcharToChar(message, s, sizeof(s));
-
-    printf("FFX: %s\n", s);
+static void FfxDebugMessage(uint32_t messageType, const wchar_t* message) {
+    NRI_FFX_DEBUG_LOG(messageType, message);
 }
 
 #    endif
@@ -1193,7 +1190,10 @@ void UpscalerImpl::GetUpscalerProps(UpscalerProps& upscalerProps) const {
     upscalerProps.renderResolution.h = (Dim_t)(m_Desc.upscaleResolution.h / scalingFactor + 0.5f);
     upscalerProps.jitterPhaseNum = (uint8_t)std::ceil(8.0f * scalingFactor * scalingFactor);
 
-    if (m_Desc.mode == UpscalerMode::ULTRA_QUALITY || m_Desc.mode == UpscalerMode::QUALITY || m_Desc.mode == UpscalerMode::BALANCED) {
+    if (m_Desc.type == UpscalerType::NIS) {
+        upscalerProps.renderResolutionMin.w = 0;
+        upscalerProps.renderResolutionMin.h = 0;
+    } else if (m_Desc.mode == UpscalerMode::ULTRA_QUALITY || m_Desc.mode == UpscalerMode::QUALITY || m_Desc.mode == UpscalerMode::BALANCED) {
         upscalerProps.renderResolutionMin.w = m_Desc.upscaleResolution.w / 2;
         upscalerProps.renderResolutionMin.h = m_Desc.upscaleResolution.h / 2;
     } else
@@ -1282,8 +1282,12 @@ void UpscalerImpl::CmdDispatchUpscale(CommandBuffer& commandBuffer, const Dispat
         dispatchDesc.frameTimeDelta = dispatchUpscaleDesc.settings.fsr.frameTime;
         dispatchDesc.preExposure = 1.0f;
         dispatchDesc.reset = (dispatchUpscaleDesc.flags & DispatchUpscaleBits::RESET_HISTORY) != 0;
-        dispatchDesc.cameraNear = dispatchUpscaleDesc.settings.fsr.zNear;
-        dispatchDesc.cameraFar = (m_Desc.flags & UpscalerBits::DEPTH_INFINITE) ? FLT_MAX : dispatchUpscaleDesc.settings.fsr.zFar;
+        const float zNear = dispatchUpscaleDesc.settings.fsr.zNear;
+        const float zFar = (m_Desc.flags & UpscalerBits::DEPTH_INFINITE) ? FLT_MAX : dispatchUpscaleDesc.settings.fsr.zFar;
+
+        // FFX swaps camera near and far for inverted depth
+        dispatchDesc.cameraNear = (m_Desc.flags & UpscalerBits::DEPTH_INVERTED) ? zFar : zNear;
+        dispatchDesc.cameraFar = (m_Desc.flags & UpscalerBits::DEPTH_INVERTED) ? zNear : zFar;
         dispatchDesc.cameraFovAngleVertical = dispatchUpscaleDesc.settings.fsr.verticalFov;
         dispatchDesc.viewSpaceToMetersFactor = dispatchUpscaleDesc.settings.fsr.viewSpaceToMetersFactor;
         dispatchDesc.flags = (m_Desc.flags & UpscalerBits::SRGB) ? FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB : 0;

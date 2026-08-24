@@ -97,6 +97,10 @@ struct DeviceVal final : public DeviceBase {
         return ((DeviceBase&)m_Impl).GetDesc();
     }
 
+    Result ReportDeviceLostInfo(DeviceLostDump& deviceLostDump) override {
+        return ((DeviceBase&)m_Impl).ReportDeviceLostInfo(deviceLostDump);
+    }
+
     void Destruct() override;
     Result FillFunctionTable(CoreInterface& table) const override;
     Result FillFunctionTable(HelperInterface& table) const override;

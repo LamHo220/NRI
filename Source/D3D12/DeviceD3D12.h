@@ -10,6 +10,14 @@ typedef ID3D12Device8 ID3D12DeviceBest;
 
 namespace nri {
 
+struct HostCopyLayoutD3D12 {
+    TextureDataLayoutDesc dataLayout;
+    uint64_t slicePitch;
+    uint32_t rowSize;
+    uint32_t rowNum;
+    uint32_t depth;
+};
+
 struct DeviceD3D12 final : public DeviceBase {
     DeviceD3D12(const CallbackInterface& callbacks, const AllocationCallbacks& allocationCallbacks);
     ~DeviceD3D12();
@@ -122,6 +130,7 @@ struct DeviceD3D12 final : public DeviceBase {
     }
 
     void Destruct() override;
+    Result ReportDeviceLostInfo(DeviceLostDump& deviceLostDump) override;
     Result FillFunctionTable(CoreInterface& table) const override;
     Result FillFunctionTable(HelperInterface& table) const override;
     Result FillFunctionTable(LowLatencyInterface& table) const override;
@@ -142,6 +151,8 @@ struct DeviceD3D12 final : public DeviceBase {
 
     Result GetQueue(QueueType queueType, uint32_t queueIndex, Queue*& queue);
     Result WaitIdle();
+    Result UploadHostMemoryToTexture(QueueD3D12& queue, const UploadHostMemoryToTextureDesc* copyDescs, uint32_t copyDescNum);
+    Result ReadbackTextureToHostMemory(QueueD3D12& queue, const ReadbackTextureToHostMemoryDesc* copyDescs, uint32_t copyDescNum);
     Result BindBufferMemory(const BindBufferMemoryDesc* bindBufferMemoryDescs, uint32_t bindBufferMemoryDescNum);
     Result BindTextureMemory(const BindTextureMemoryDesc* bindTextureMemoryDescs, uint32_t bindTextureMemoryDescNum);
     Result BindAccelerationStructureMemory(const BindAccelerationStructureMemoryDesc* bindAccelerationStructureMemoryDescs, uint32_t bindAccelerationStructureMemoryDescNum);
@@ -149,6 +160,11 @@ struct DeviceD3D12 final : public DeviceBase {
     FormatSupportBits GetFormatSupport(Format format) const;
 
 private:
+    void ReportDredAllocationList(const char* listName, const D3D12_DRED_ALLOCATION_NODE1* head) const;
+    void ReportDred(ID3D12Device* nativeDevice) const;
+    HostCopyLayoutD3D12 GetHostCopyLayout(const TextureD3D12& texture, const TextureRegionDesc& region, uint64_t& offset) const;
+    Result AcquireTransferContext(QueueD3D12& queue, TransferContextD3D12*& context);
+    void ReleaseTransferContext(TransferContextD3D12& context);
     HRESULT CreateVma();
     void FillDesc(bool disableD3D12EnhancedBarrier);
     void InitializeNvExt(bool disableNVAPIInitialization, bool isImported);
@@ -180,6 +196,7 @@ private:
     UnorderedMap<uint64_t, ComPtr<ID3D12CommandSignature>> m_DrawIndexedCommandSignatures; // m_CommandSignatureLock
     UnorderedMap<uint32_t, ComPtr<ID3D12CommandSignature>> m_DrawMeshCommandSignatures;    // m_CommandSignatureLock
     std::array<Vector<QueueD3D12*>, (size_t)QueueType::MAX_NUM> m_QueueFamilies;
+    Vector<TransferContextD3D12*> m_TransferContexts;
     CoreInterface m_iCore = {};
     DeviceDesc m_Desc = {};
     void* m_CallbackHandle = nullptr;
@@ -192,6 +209,7 @@ private:
     std::array<Lock, D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES> m_FreeDescriptorLocks;
     Lock m_DescriptorHeapLock;
     Lock m_CommandSignatureLock;
+    Lock m_TransferContextLock;
 };
 
 } // namespace nri
