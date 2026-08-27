@@ -47,6 +47,8 @@ struct BufferVK final : public DebugNameBase {
     void Unmap();
 
 private:
+    bool IsVideoOnly() const;
+    void FillCreateInfo(VkBufferCreateInfo& info) const;
     VkMappedMemoryRange GetNonCoherentMappedMemoryRange(uint64_t offset, uint64_t size) const;
 
     DeviceVK& m_Device;

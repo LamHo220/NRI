@@ -75,7 +75,9 @@ Result PipelineLayoutD3D12::Create(const PipelineLayoutDesc& pipelineLayoutDesc)
     Scratch<D3D12_STATIC_SAMPLER_DESC> staticSamplers = NRI_ALLOCATE_SCRATCH(m_Device, D3D12_STATIC_SAMPLER_DESC, pipelineLayoutDesc.rootSamplerNum);
 #endif
 
-    Vector<D3D12_ROOT_PARAMETER1> rootParameters(allocator);
+    const uint32_t rootParameterMaxNum = rangeMaxNum + pipelineLayoutDesc.rootConstantNum + pipelineLayoutDesc.rootDescriptorNum + 2;
+    Scratch<D3D12_ROOT_PARAMETER1> rootParameters = NRI_ALLOCATE_SCRATCH(m_Device, D3D12_ROOT_PARAMETER1, rootParameterMaxNum);
+    uint32_t rootParameterNum = 0;
 
     // Draw parameters emulation
     m_DrawParametersEmulation = (pipelineLayoutDesc.flags & PipelineLayoutBits::ENABLE_DRAW_PARAMETERS_EMULATION) != 0 && (pipelineLayoutDesc.shaderStages & StageBits::VERTEX_SHADER) != 0;
@@ -87,8 +89,8 @@ Result PipelineLayoutD3D12::Create(const PipelineLayoutDesc& pipelineLayoutDesc)
         rootParam.Constants.RegisterSpace = NRI_BASE_ATTRIBUTES_EMULATION_SPACE;
         rootParam.Constants.Num32BitValues = 2;
 
-        m_DrawParametersRootConstantIndex = (RootParameterIndexType)rootParameters.size();
-        rootParameters.push_back(rootParam);
+        m_DrawParametersRootConstantIndex = (RootParameterIndexType)rootParameterNum;
+        rootParameters[rootParameterNum++] = rootParam;
     }
 
     // Draw index emulation
@@ -102,8 +104,8 @@ Result PipelineLayoutD3D12::Create(const PipelineLayoutDesc& pipelineLayoutDesc)
         rootParam.Constants.RegisterSpace = NRI_BASE_ATTRIBUTES_EMULATION_SPACE;
         rootParam.Constants.Num32BitValues = 1;
 
-        m_DrawIndexRootConstantIndex = (RootParameterIndexType)rootParameters.size();
-        rootParameters.push_back(rootParam);
+        m_DrawIndexRootConstantIndex = (RootParameterIndexType)rootParameterNum;
+        rootParameters[rootParameterNum++] = rootParam;
     }
 #endif
 
@@ -142,14 +144,14 @@ Result PipelineLayoutD3D12::Create(const PipelineLayoutDesc& pipelineLayoutDesc)
 
             if (groupedRangeNum && (rootTable.ShaderVisibility != shaderVisibility || groupedRangeType != rangeType)) {
                 rootTable.DescriptorTable.NumDescriptorRanges = groupedRangeNum;
-                rootParameters.push_back(rootTable);
+                rootParameters[rootParameterNum++] = rootTable;
                 rangeNum += groupedRangeNum;
 
                 groupedRangeNum = 0;
             }
             groupedRangeType = rangeType;
 
-            descriptorRangeMapping.rootParameterIndex = groupedRangeNum ? ROOT_PARAMETER_UNUSED : (RootParameterIndexType)rootParameters.size();
+            descriptorRangeMapping.rootParameterIndex = groupedRangeNum ? ROOT_PARAMETER_UNUSED : (RootParameterIndexType)rootParameterNum;
 
             rootTable.ShaderVisibility = shaderVisibility;
             rootTable.DescriptorTable.pDescriptorRanges = &ranges[rangeNum];
@@ -169,14 +171,14 @@ Result PipelineLayoutD3D12::Create(const PipelineLayoutDesc& pipelineLayoutDesc)
         // Finalize merging
         if (groupedRangeNum) {
             rootTable.DescriptorTable.NumDescriptorRanges = groupedRangeNum;
-            rootParameters.push_back(rootTable);
+            rootParameters[rootParameterNum++] = rootTable;
             rangeNum += groupedRangeNum;
         }
     }
 
     // Root constants
     if (pipelineLayoutDesc.rootConstantNum) {
-        m_BaseRootConstant = (uint32_t)rootParameters.size();
+        m_BaseRootConstant = rootParameterNum;
 
         for (uint32_t i = 0; i < pipelineLayoutDesc.rootConstantNum; i++) {
             const RootConstantDesc& rootConstantDesc = pipelineLayoutDesc.rootConstants[i];
@@ -188,13 +190,13 @@ Result PipelineLayoutD3D12::Create(const PipelineLayoutDesc& pipelineLayoutDesc)
             rootConstants.Constants.RegisterSpace = pipelineLayoutDesc.rootRegisterSpace;
             rootConstants.Constants.Num32BitValues = rootConstantDesc.size / 4;
 
-            rootParameters.push_back(rootConstants);
+            rootParameters[rootParameterNum++] = rootConstants;
         }
     }
 
     // Root descriptors
     if (pipelineLayoutDesc.rootDescriptorNum) {
-        m_BaseRootDescriptor = (uint32_t)rootParameters.size();
+        m_BaseRootDescriptor = rootParameterNum;
 
         for (uint32_t i = 0; i < pipelineLayoutDesc.rootDescriptorNum; i++) {
             const RootDescriptorDesc& rootDescriptorDesc = pipelineLayoutDesc.rootDescriptors[i];
@@ -212,7 +214,7 @@ Result PipelineLayoutD3D12::Create(const PipelineLayoutDesc& pipelineLayoutDesc)
             else
                 rootDescriptor.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
 
-            rootParameters.push_back(rootDescriptor);
+            rootParameters[rootParameterNum++] = rootDescriptor;
         }
     }
 
@@ -271,8 +273,8 @@ Result PipelineLayoutD3D12::Create(const PipelineLayoutDesc& pipelineLayoutDesc)
     rootSignatureVersionedDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     D3D12_ROOT_SIGNATURE_DESC1& rootSignatureDesc = rootSignatureVersionedDesc.Desc_1_1;
 #endif
-    rootSignatureDesc.NumParameters = (UINT)rootParameters.size();
-    rootSignatureDesc.pParameters = rootParameters.empty() ? nullptr : rootParameters.data();
+    rootSignatureDesc.NumParameters = rootParameterNum;
+    rootSignatureDesc.pParameters = rootParameterNum ? (D3D12_ROOT_PARAMETER1*)rootParameters : nullptr;
     rootSignatureDesc.NumStaticSamplers = pipelineLayoutDesc.rootSamplerNum;
     rootSignatureDesc.pStaticSamplers = staticSamplers;
     rootSignatureDesc.Flags = GetRootSignatureStageFlags(pipelineLayoutDesc, m_Device);

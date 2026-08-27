@@ -17,7 +17,13 @@ static inline DXGI_FORMAT GetPatchedShaderResourceViewFormat(DXGI_FORMAT format,
 
 static inline uint32_t GetPlaneIndex(PlaneBits planes) {
     // https://microsoft.github.io/DirectX-Specs/d3d/PlanarDepthStencilDDISpec.html
-    return (planes & PlaneBits::STENCIL) ? 1 : 0;
+    if (planes & PlaneBits::STENCIL)
+        return 1;
+    if (planes & PlaneBits::PLANE_2)
+        return 2;
+    if (planes & PlaneBits::PLANE_1)
+        return 1;
+    return 0;
 }
 
 static inline DXGI_FORMAT GetResourceFormat(const TextureD3D12& texture) {
@@ -317,7 +323,7 @@ Result DescriptorD3D12::Create(const TextureViewDesc& textureViewDesc) {
 Result DescriptorD3D12::Create(const BufferViewDesc& bufferViewDesc) {
     const BufferD3D12& bufferD3D12 = *((BufferD3D12*)bufferViewDesc.buffer);
     const BufferDesc& bufferDesc = bufferD3D12.GetDesc();
-    uint64_t size = bufferViewDesc.size == WHOLE_SIZE ? bufferDesc.size : bufferViewDesc.size;
+    uint64_t size = bufferViewDesc.size == WHOLE_SIZE ? (bufferDesc.size - bufferViewDesc.offset) : bufferViewDesc.size;
 
     Format patchedFormat = Format::UNKNOWN;
     uint32_t structureStride = 0;
@@ -336,7 +342,7 @@ Result DescriptorD3D12::Create(const BufferViewDesc& bufferViewDesc) {
     const DxgiFormat& format = GetDxgiFormat(patchedFormat);
     const FormatProps& formatProps = GetFormatProps(patchedFormat);
     uint32_t elementSize = structureStride ? structureStride : formatProps.stride;
-    uint64_t elementOffset = (uint32_t)(bufferViewDesc.offset / elementSize);
+    uint64_t elementOffset = bufferViewDesc.offset / elementSize;
     uint32_t elementNum = (uint32_t)(size / elementSize);
 
     m_ViewDesc.bufferGPUVA = bufferD3D12.GetDeviceAddress() + bufferViewDesc.offset;

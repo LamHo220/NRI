@@ -26,10 +26,10 @@ struct QueueVK final : public DebugNameBase {
     }
 
     inline Lock& GetLock() {
-        return m_Lock;
+        return *m_Lock;
     }
 
-    Result Create(QueueType type, uint32_t familyIndex, VkQueue handle);
+    Result Create(QueueType type, uint32_t familyIndex, VkQueue handle, Lock* sharedLock);
 
     //================================================================================================================
     // DebugNameBase
@@ -51,9 +51,10 @@ struct QueueVK final : public DebugNameBase {
 private:
     DeviceVK& m_Device;
     VkQueue m_Handle = VK_NULL_HANDLE;
+    Lock* m_Lock = nullptr; // lock actually used
     uint32_t m_FamilyIndex = INVALID_FAMILY_INDEX;
     QueueType m_Type = QueueType(-1);
-    Lock m_Lock;
+    Lock m_OwnLock; // storage used when this wrapper owns the lock
 };
 
 } // namespace nri

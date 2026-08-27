@@ -41,7 +41,7 @@ static inline uint64_t HashRootSignatureAndStride(ID3D12RootSignature* rootSigna
     return ((uint64_t)stride << 52ull) | ((uint64_t)rootSignature & ((1ull << 52) - 1));
 }
 
-static inline const char* GetDredDeviceStateName(D3D12_DRED_DEVICE_STATE state) {
+static const char* GetDredDeviceStateName(D3D12_DRED_DEVICE_STATE state) {
     switch (state) {
         case D3D12_DRED_DEVICE_STATE_UNKNOWN:
             return "Unknown";
@@ -56,7 +56,7 @@ static inline const char* GetDredDeviceStateName(D3D12_DRED_DEVICE_STATE state) 
     return "Invalid";
 }
 
-static inline const char* GetDredBreadcrumbOpName(D3D12_AUTO_BREADCRUMB_OP op) {
+static const char* GetDredBreadcrumbOpName(D3D12_AUTO_BREADCRUMB_OP op) {
     switch (op) {
         case D3D12_AUTO_BREADCRUMB_OP_SETMARKER:
             return "SetMarker";
@@ -173,7 +173,7 @@ static inline const char* GetDredBreadcrumbOpName(D3D12_AUTO_BREADCRUMB_OP op) {
     }
 }
 
-static inline const char* GetDredObjectName(const char* ansiName, const wchar_t* wideName, char* storage, size_t storageSize) {
+static const char* GetDredObjectName(const char* ansiName, const wchar_t* wideName, char* storage, size_t storageSize) {
     if (ansiName && ansiName[0] != '\0')
         return ansiName;
 
@@ -259,6 +259,14 @@ static D3D12_RESOURCE_FLAGS GetTextureFlags(TextureUsageBits textureUsage) {
             flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
     }
 
+    if (textureUsage & TextureUsageBits::VIDEO_REFERENCE_ONLY) {
+        if (textureUsage & TextureUsageBits::VIDEO_DECODE)
+            flags |= D3D12_RESOURCE_FLAG_VIDEO_DECODE_REFERENCE_ONLY;
+        if (textureUsage & TextureUsageBits::VIDEO_ENCODE)
+            flags |= D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY;
+        flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    }
+
     return flags;
 }
 
@@ -274,6 +282,156 @@ static void vmaFree(void* pMemory, void* pPrivateData) {
     return allocationCallbacks.Free(allocationCallbacks.userArg, pMemory);
 }
 
+static bool IsVideoDecodeCodecSupported(ID3D12VideoDevice* videoDevice, VideoCodec codec) {
+    constexpr uint32_t width = 128;
+    constexpr uint32_t height = 128;
+
+    D3D12_VIDEO_DECODE_CONFIGURATION configuration = {};
+    configuration.DecodeProfile = GetVideoDecodeProfile(codec, Format::NV12_UNORM);
+    configuration.BitstreamEncryption = D3D12_BITSTREAM_ENCRYPTION_TYPE_NONE;
+    configuration.InterlaceType = D3D12_VIDEO_FRAME_CODED_INTERLACE_TYPE_NONE;
+    if (configuration.DecodeProfile == GUID{})
+        return false;
+
+    D3D12_FEATURE_DATA_VIDEO_DECODE_SUPPORT decodeSupport = {};
+    decodeSupport.Configuration = configuration;
+    decodeSupport.Width = width;
+    decodeSupport.Height = height;
+    decodeSupport.DecodeFormat = DXGI_FORMAT_NV12;
+    decodeSupport.FrameRate = {30, 1};
+
+    HRESULT hr = videoDevice->CheckFeatureSupport(D3D12_FEATURE_VIDEO_DECODE_SUPPORT, &decodeSupport, sizeof(decodeSupport));
+    if (FAILED(hr))
+        return false;
+
+    if ((decodeSupport.SupportFlags & D3D12_VIDEO_DECODE_SUPPORT_FLAG_SUPPORTED) == 0)
+        return false;
+
+    return (decodeSupport.ConfigurationFlags & D3D12_VIDEO_DECODE_CONFIGURATION_FLAG_REFERENCE_ONLY_ALLOCATIONS_REQUIRED) == 0;
+}
+
+static bool CanUseSmallAlignment(const D3D12_RESOURCE_DESC1& desc, const FormatProps& formatProps) {
+    // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_resource_desc#alignment
+    // WTF, MS? You never explained the hidden logic behind "small alignment" assuming "GetResourceAllocationInfo" usage, which just
+    // throws a debug error, if a user wants to check the support. And the error is what we want to avoid! Thanks for the "chicken-egg" problem!
+
+    // Global restrictions
+    if (desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+        return false;
+
+    // Tile dims
+    uint32_t tW = 1;
+    uint32_t tH = 1;
+    uint32_t tD = 1;
+
+    if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+        // 3D standard swizzle (4KB tiles)
+        switch (formatProps.stride) {
+            case 1:
+                tW = 16;
+                tH = 16;
+                tD = 16;
+                break;
+            case 2:
+                tW = 16;
+                tH = 16;
+                tD = 8;
+                break;
+            case 4:
+                tW = 16;
+                tH = 8;
+                tD = 8;
+                break;
+            case 8:
+                tW = 8;
+                tH = 8;
+                tD = 8;
+                break;
+            case 16:
+                tW = 8;
+                tH = 8;
+                tD = 4;
+                break;
+            default:
+                return false;
+        }
+    } else if (desc.SampleDesc.Count > 1) {
+        // 2D MSAA standard swizzle (64KB tiles)
+        switch (formatProps.stride) {
+            case 1:
+                tW = 256;
+                tH = 256;
+                break;
+            case 2:
+                tW = 256;
+                tH = 128;
+                break;
+            case 4:
+                tW = 128;
+                tH = 128;
+                break;
+            case 8:
+                tW = 128;
+                tH = 64;
+                break;
+            case 16:
+                tW = 64;
+                tH = 64;
+                break;
+            default:
+                return false;
+        }
+    } else {
+        // 1D and 2D standard swizzle (4KB tiles)
+        if (formatProps.isCompressed) {
+            tW = formatProps.stride == 8 ? 128 : 64;
+            tH = 64;
+        } else {
+            switch (formatProps.stride) {
+                case 1:
+                    tW = 64;
+                    tH = 64;
+                    break;
+                case 2:
+                    tW = 64;
+                    tH = 32;
+                    break;
+                case 4:
+                    tW = 32;
+                    tH = 32;
+                    break;
+                case 8:
+                    tW = 32;
+                    tH = 16;
+                    break;
+                case 16:
+                    tW = 16;
+                    tH = 16;
+                    break;
+                default:
+                    return false;
+            }
+        }
+
+        // For 1D textures, the height is effectively 1 texel, but the tile "shape" remains the same for the width calculation
+        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D)
+            tH = 1;
+    }
+
+    // Calculate grid
+    uint32_t tilesX = ((uint32_t)desc.Width + tW - 1) / tW;
+    uint32_t tilesY = (desc.Height + tH - 1) / tH;
+    uint32_t tilesZ = desc.DepthOrArraySize;
+
+    if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+        tilesZ = (desc.DepthOrArraySize + tD - 1) / tD;
+
+    // Must fit in 16 tiles
+    uint32_t totalTiles = tilesX * tilesY * tilesZ;
+
+    return totalTiles <= 16;
+}
+
 DeviceD3D12::DeviceD3D12(const CallbackInterface& callbacks, const AllocationCallbacks& allocationCallbacks)
     : DeviceBase(callbacks, allocationCallbacks)
     , m_DescriptorHeaps(GetStdAllocator())
@@ -282,6 +440,8 @@ DeviceD3D12::DeviceD3D12(const CallbackInterface& callbacks, const AllocationCal
     , m_DrawIndexedCommandSignatures(GetStdAllocator())
     , m_DrawMeshCommandSignatures(GetStdAllocator())
     , m_QueueFamilies{
+          Vector<QueueD3D12*>(GetStdAllocator()),
+          Vector<QueueD3D12*>(GetStdAllocator()),
           Vector<QueueD3D12*>(GetStdAllocator()),
           Vector<QueueD3D12*>(GetStdAllocator()),
           Vector<QueueD3D12*>(GetStdAllocator()),
@@ -686,6 +846,7 @@ void DeviceD3D12::FillDesc(bool disableD3D12EnhancedBarrier) {
         NRI_REPORT_WARNING(this, "ID3D12Device::CheckFeatureSupport(options13) failed, result = 0x%08X!", hr);
     m_Desc.memoryAlignment.uploadBufferTextureRow = options13.UnrestrictedBufferTextureCopyPitchSupported ? 1 : D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
     m_Desc.memoryAlignment.uploadBufferTextureSlice = options13.UnrestrictedBufferTextureCopyPitchSupported ? 1 : D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    m_Desc.features.constantAlphaBlendFactors = options13.AlphaBlendFactorSupported;
     m_Desc.features.viewportOriginBottomLeft = options13.InvertedViewportHeightFlipsYSupported;
 
     // Agility 1.608
@@ -1014,6 +1175,8 @@ void DeviceD3D12::FillDesc(bool disableD3D12EnhancedBarrier) {
     m_Desc.features.timestampCopyQueue = options3.CopyQueueTimestampQueriesSupported;
     m_Desc.features.calibratedTimestamps = true;
     m_Desc.features.additionalShadingRates = options6.AdditionalShadingRatesSupported;
+    m_Desc.features.rectColorClears = true;
+    m_Desc.features.rectDepthStencilClears = true;
     m_Desc.features.regionResolve = true;
     m_Desc.features.resolveOpMinMax = true;
     m_Desc.features.pipelineCache = isPipelineLibrarySupported;
@@ -1035,6 +1198,19 @@ void DeviceD3D12::FillDesc(bool disableD3D12EnhancedBarrier) {
     m_Desc.features.mutableDescriptorType = true;
     m_Desc.features.extendedDynamicState = true;
     m_Desc.features.resourceAliasing = true;
+
+    ComPtr<ID3D12VideoDevice> videoDevice;
+    if (SUCCEEDED(m_Device->QueryInterface(IID_PPV_ARGS(&videoDevice)))) {
+        m_Desc.videoFeatures.decode.H264 = IsVideoDecodeCodecSupported(videoDevice, VideoCodec::H264);
+        m_Desc.videoFeatures.decode.H265 = IsVideoDecodeCodecSupported(videoDevice, VideoCodec::H265);
+        m_Desc.videoFeatures.decode.AV1 = IsVideoDecodeCodecSupported(videoDevice, VideoCodec::AV1);
+
+#if NRI_ENABLE_AGILITY_SDK_SUPPORT
+        m_Desc.videoFeatures.encode.H264 = IsVideoEncodeCodecSupported(videoDevice, VideoCodec::H264);
+        m_Desc.videoFeatures.encode.H265 = IsVideoEncodeCodecSupported(videoDevice, VideoCodec::H265);
+        m_Desc.videoFeatures.encode.AV1 = IsVideoEncodeCodecSupported(videoDevice, VideoCodec::AV1);
+#endif
+    }
 
     bool isShaderAtomicsF16Supported = false;
     bool isShaderAtomicsF32Supported = false;
@@ -1288,128 +1464,6 @@ void DeviceD3D12::GetResourceDesc(const BufferDesc& bufferDesc, D3D12_RESOURCE_D
     if (m_TightAlignmentTier != 0)
         desc.Flags |= D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT;
 #endif
-}
-
-static inline bool CanUseSmallAlignment(const D3D12_RESOURCE_DESC1& desc, const FormatProps& formatProps) {
-    // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_resource_desc#alignment
-    // WTF, MS? You never explained the hidden logic behind "small alignment" assuming "GetResourceAllocationInfo" usage, which just
-    // throws a debug error, if a user wants to check the support. And the error is what we want to avoid! Thanks for the "chicken-egg" problem!
-
-    // Global restrictions
-    if (desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
-        return false;
-
-    // Tile dims
-    uint32_t tW = 1;
-    uint32_t tH = 1;
-    uint32_t tD = 1;
-
-    if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
-        // 3D standard swizzle (4KB tiles)
-        switch (formatProps.stride) {
-            case 1:
-                tW = 16;
-                tH = 16;
-                tD = 16;
-                break;
-            case 2:
-                tW = 16;
-                tH = 16;
-                tD = 8;
-                break;
-            case 4:
-                tW = 16;
-                tH = 8;
-                tD = 8;
-                break;
-            case 8:
-                tW = 8;
-                tH = 8;
-                tD = 8;
-                break;
-            case 16:
-                tW = 8;
-                tH = 8;
-                tD = 4;
-                break;
-            default:
-                return false;
-        }
-    } else if (desc.SampleDesc.Count > 1) {
-        // 2D MSAA standard swizzle (64KB tiles)
-        switch (formatProps.stride) {
-            case 1:
-                tW = 256;
-                tH = 256;
-                break;
-            case 2:
-                tW = 256;
-                tH = 128;
-                break;
-            case 4:
-                tW = 128;
-                tH = 128;
-                break;
-            case 8:
-                tW = 128;
-                tH = 64;
-                break;
-            case 16:
-                tW = 64;
-                tH = 64;
-                break;
-            default:
-                return false;
-        }
-    } else {
-        // 1D and 2D standard swizzle (4KB tiles)
-        if (formatProps.isCompressed) {
-            tW = formatProps.stride == 8 ? 128 : 64;
-            tH = 64;
-        } else {
-            switch (formatProps.stride) {
-                case 1:
-                    tW = 64;
-                    tH = 64;
-                    break;
-                case 2:
-                    tW = 64;
-                    tH = 32;
-                    break;
-                case 4:
-                    tW = 32;
-                    tH = 32;
-                    break;
-                case 8:
-                    tW = 32;
-                    tH = 16;
-                    break;
-                case 16:
-                    tW = 16;
-                    tH = 16;
-                    break;
-                default:
-                    return false;
-            }
-        }
-
-        // For 1D textures, the height is effectively 1 texel, but the tile "shape" remains the same for the width calculation
-        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D)
-            tH = 1;
-    }
-
-    // Calculate grid
-    uint32_t tilesX = ((uint32_t)desc.Width + tW - 1) / tW;
-    uint32_t tilesY = (desc.Height + tH - 1) / tH;
-    uint32_t tilesZ = desc.DepthOrArraySize;
-
-    if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
-        tilesZ = (desc.DepthOrArraySize + tD - 1) / tD;
-
-    // Must fit in 16 tiles
-    uint32_t totalTiles = tilesX * tilesY * tilesZ;
-
-    return totalTiles <= 16;
 }
 
 void DeviceD3D12::GetResourceDesc(const TextureDesc& textureDesc, D3D12_RESOURCE_DESC1& desc) const {
@@ -1939,7 +1993,7 @@ Result DeviceD3D12::UploadHostMemoryToTexture(QueueD3D12& queue, const UploadHos
             });
 
             uint32_t barrierNum = (uint32_t)(end - restorationBarriersBegin);
-            ID3D12GraphicsCommandList* commandList = context->GetCommandBuffer();
+            ID3D12GraphicsCommandList* commandList = context->GetCommandBuffer().GetGraphicsCommandList();
             commandList->ResourceBarrier(barrierNum, restorationBarriersBegin);
         }
 
@@ -2042,9 +2096,9 @@ void DeviceD3D12::ReleaseTransferContext(TransferContextD3D12& context) {
     context.SetInUse(false);
 }
 
-NRI_INLINE Result DeviceD3D12::BindBufferMemory(const BindBufferMemoryDesc* bindBufferMemoryDescs, uint32_t bindBufferMemoryDescNum) {
-    for (uint32_t i = 0; i < bindBufferMemoryDescNum; i++) {
-        const auto& desc = bindBufferMemoryDescs[i];
+NRI_INLINE Result BindBufferMemoryD3D12(const BindBufferMemoryDesc* descs, uint32_t descNum) {
+    for (uint32_t i = 0; i < descNum; i++) {
+        const BindBufferMemoryDesc& desc = descs[i];
         Result result = ((BufferD3D12*)desc.buffer)->BindMemory(*(MemoryD3D12*)desc.memory, desc.offset);
         if (result != Result::SUCCESS)
             return result;
@@ -2053,9 +2107,9 @@ NRI_INLINE Result DeviceD3D12::BindBufferMemory(const BindBufferMemoryDesc* bind
     return Result::SUCCESS;
 }
 
-NRI_INLINE Result DeviceD3D12::BindTextureMemory(const BindTextureMemoryDesc* bindTextureMemoryDescs, uint32_t bindTextureMemoryDescNum) {
-    for (uint32_t i = 0; i < bindTextureMemoryDescNum; i++) {
-        const auto& desc = bindTextureMemoryDescs[i];
+NRI_INLINE Result BindTextureMemoryD3D12(const BindTextureMemoryDesc* descs, uint32_t descNum) {
+    for (uint32_t i = 0; i < descNum; i++) {
+        const BindTextureMemoryDesc& desc = descs[i];
         Result result = ((TextureD3D12*)desc.texture)->BindMemory(*(MemoryD3D12*)desc.memory, desc.offset);
         if (result != Result::SUCCESS)
             return result;
@@ -2064,9 +2118,9 @@ NRI_INLINE Result DeviceD3D12::BindTextureMemory(const BindTextureMemoryDesc* bi
     return Result::SUCCESS;
 }
 
-NRI_INLINE Result DeviceD3D12::BindAccelerationStructureMemory(const BindAccelerationStructureMemoryDesc* bindAccelerationStructureMemoryDescs, uint32_t bindAccelerationStructureMemoryDescNum) {
-    for (uint32_t i = 0; i < bindAccelerationStructureMemoryDescNum; i++) {
-        const auto& desc = bindAccelerationStructureMemoryDescs[i];
+NRI_INLINE Result BindAccelerationStructureMemoryD3D12(const BindAccelerationStructureMemoryDesc* descs, uint32_t descNum) {
+    for (uint32_t i = 0; i < descNum; i++) {
+        const BindAccelerationStructureMemoryDesc& desc = descs[i];
         Result result = ((AccelerationStructureD3D12*)desc.accelerationStructure)->BindMemory(*(MemoryD3D12*)desc.memory, desc.offset);
         if (result != Result::SUCCESS)
             return result;
@@ -2075,9 +2129,9 @@ NRI_INLINE Result DeviceD3D12::BindAccelerationStructureMemory(const BindAcceler
     return Result::SUCCESS;
 }
 
-NRI_INLINE Result DeviceD3D12::BindMicromapMemory(const BindMicromapMemoryDesc* bindMicromapMemoryDescs, uint32_t bindMicromapMemoryDescNum) {
-    for (uint32_t i = 0; i < bindMicromapMemoryDescNum; i++) {
-        const auto& desc = bindMicromapMemoryDescs[i];
+NRI_INLINE Result BindMicromapMemoryD3D12(const BindMicromapMemoryDesc* descs, uint32_t descNum) {
+    for (uint32_t i = 0; i < descNum; i++) {
+        const BindMicromapMemoryDesc& desc = descs[i];
         Result result = ((MicromapD3D12*)desc.micromap)->BindMemory(*(MemoryD3D12*)desc.memory, desc.offset);
         if (result != Result::SUCCESS)
             return result;

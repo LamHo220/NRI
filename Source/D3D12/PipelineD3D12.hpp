@@ -317,11 +317,11 @@ static inline void FillBlendState(D3D12_BLEND_DESC& blendDesc, const GraphicsPip
         if (colorAttachmentDesc.blendEnabled) {
             blendDesc.RenderTarget[i].LogicOp = GetLogicOp(om.logicOp);
             blendDesc.RenderTarget[i].LogicOpEnable = om.logicOp != LogicOp::NONE ? TRUE : FALSE;
-            blendDesc.RenderTarget[i].SrcBlend = GetBlend(colorAttachmentDesc.colorBlend.srcFactor);
-            blendDesc.RenderTarget[i].DestBlend = GetBlend(colorAttachmentDesc.colorBlend.dstFactor);
+            blendDesc.RenderTarget[i].SrcBlend = GetBlend(colorAttachmentDesc.colorBlend.srcFactor, false);
+            blendDesc.RenderTarget[i].DestBlend = GetBlend(colorAttachmentDesc.colorBlend.dstFactor, false);
             blendDesc.RenderTarget[i].BlendOp = GetBlendOp(colorAttachmentDesc.colorBlend.op);
-            blendDesc.RenderTarget[i].SrcBlendAlpha = GetBlend(colorAttachmentDesc.alphaBlend.srcFactor);
-            blendDesc.RenderTarget[i].DestBlendAlpha = GetBlend(colorAttachmentDesc.alphaBlend.dstFactor);
+            blendDesc.RenderTarget[i].SrcBlendAlpha = GetBlend(colorAttachmentDesc.alphaBlend.srcFactor, true);
+            blendDesc.RenderTarget[i].DestBlendAlpha = GetBlend(colorAttachmentDesc.alphaBlend.dstFactor, true);
             blendDesc.RenderTarget[i].BlendOpAlpha = GetBlendOp(colorAttachmentDesc.alphaBlend.op);
         }
     }
@@ -594,12 +594,23 @@ Result PipelineD3D12::Create(const RayTracingPipelineDesc& rayTracingPipelineDes
         stateSubobjectNum++;
     }
 
-    Vector<std::wstring> wEntryPointNames(rayTracingPipelineDesc.shaderLibrary->shaderNum, m_Device.GetStdAllocator());
+    size_t entryPointNameTotalLength = 0;
+    for (uint32_t i = 0; i < rayTracingPipelineDesc.shaderLibrary->shaderNum; i++) {
+        const char* entryPointName = rayTracingPipelineDesc.shaderLibrary->shaders[i].entryPointName;
+        entryPointNameTotalLength += entryPointName ? strlen(entryPointName) + 1 : 0;
+    }
+
+    Scratch<const wchar_t*> wEntryPointNames = NRI_ALLOCATE_SCRATCH(m_Device, const wchar_t*, rayTracingPipelineDesc.shaderLibrary->shaderNum);
+    Scratch<wchar_t> wEntryPointNameData = NRI_ALLOCATE_SCRATCH(m_Device, wchar_t, entryPointNameTotalLength);
+    wchar_t* wEntryPointName = wEntryPointNameData;
     for (uint32_t i = 0; i < rayTracingPipelineDesc.shaderLibrary->shaderNum; i++) {
         const ShaderDesc& shader = rayTracingPipelineDesc.shaderLibrary->shaders[i];
-        const size_t entryPointNameLength = shader.entryPointName != nullptr ? strlen(shader.entryPointName) + 1 : 0;
-        wEntryPointNames[i].resize(entryPointNameLength);
-        ConvertCharToWchar(shader.entryPointName, wEntryPointNames[i].data(), entryPointNameLength);
+        const size_t entryPointNameLength = shader.entryPointName ? strlen(shader.entryPointName) + 1 : 0;
+        wEntryPointNames[i] = entryPointNameLength ? wEntryPointName : L"";
+        if (entryPointNameLength) {
+            ConvertCharToWchar(shader.entryPointName, wEntryPointName, entryPointNameLength);
+            wEntryPointName += entryPointNameLength;
+        }
     }
 
     uint32_t hitGroupNum = 0;
@@ -615,7 +626,7 @@ Result PipelineD3D12::Create(const RayTracingPipelineDesc& rayTracingPipelineDes
             if (shaderIndex) {
                 uint32_t lookupIndex = shaderIndex - 1;
                 const ShaderDesc& shader = rayTracingPipelineDesc.shaderLibrary->shaders[lookupIndex];
-                const std::wstring& entryPointName = wEntryPointNames[lookupIndex];
+                const wchar_t* entryPointName = wEntryPointNames[lookupIndex];
                 if (shader.stage == StageBits::RAYGEN_SHADER || shader.stage == StageBits::MISS_SHADER || shader.stage == StageBits::CALLABLE_SHADER) {
                     shaderIndentifierName = entryPointName;
                     isHitGroup = false;
@@ -624,14 +635,14 @@ Result PipelineD3D12::Create(const RayTracingPipelineDesc& rayTracingPipelineDes
 
                 switch (shader.stage) {
                     case StageBits::INTERSECTION_SHADER:
-                        hitGroups[hitGroupNum].IntersectionShaderImport = entryPointName.c_str();
+                        hitGroups[hitGroupNum].IntersectionShaderImport = entryPointName;
                         hasIntersectionShader = true;
                         break;
                     case StageBits::CLOSEST_HIT_SHADER:
-                        hitGroups[hitGroupNum].ClosestHitShaderImport = entryPointName.c_str();
+                        hitGroups[hitGroupNum].ClosestHitShaderImport = entryPointName;
                         break;
                     case StageBits::ANY_HIT_SHADER:
-                        hitGroups[hitGroupNum].AnyHitShaderImport = entryPointName.c_str();
+                        hitGroups[hitGroupNum].AnyHitShaderImport = entryPointName;
                         break;
                     default:
                         NRI_CHECK(false, "Unexpected 'shader.stage'");

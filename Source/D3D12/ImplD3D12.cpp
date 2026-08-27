@@ -21,11 +21,14 @@
 #include "QueueD3D12.h"
 #include "SwapChainD3D12.h"
 #include "TextureD3D12.h"
+#include "VideoPictureD3D12.h"
+#include "VideoSessionD3D12.h"
+#include "VideoSessionParametersD3D12.h"
 
 #include "HelperInterface.h"
-#include "TransferContextD3D12.h"
 #include "ImguiInterface.h"
 #include "StreamerInterface.h"
+#include "TransferContextD3D12.h"
 #include "UpscalerInterface.h"
 
 using namespace nri;
@@ -34,7 +37,6 @@ using namespace nri;
 #include "BufferD3D12.hpp"
 #include "CommandAllocatorD3D12.hpp"
 #include "CommandBufferD3D12.hpp"
-#include "TransferContextD3D12.hpp"
 #include "DescriptorD3D12.hpp"
 #include "DescriptorPoolD3D12.hpp"
 #include "DescriptorSetD3D12.hpp"
@@ -50,6 +52,10 @@ using namespace nri;
 #include "SharedD3D12.hpp"
 #include "SwapChainD3D12.hpp"
 #include "TextureD3D12.hpp"
+#include "TransferContextD3D12.hpp"
+#include "VideoPictureD3D12.hpp"
+#include "VideoSessionD3D12.hpp"
+#include "VideoSessionParametersD3D12.hpp"
 
 Result CreateDeviceD3D12(const DeviceCreationDesc& desc, const DeviceCreationD3D12Desc& descD3D12, DeviceBase*& device) {
     DeviceD3D12* impl = Allocate<DeviceD3D12>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks);
@@ -223,19 +229,11 @@ static void NRI_CALL GetTextureMemoryDesc(const Texture& texture, MemoryLocation
 }
 
 static Result NRI_CALL BindBufferMemory(const BindBufferMemoryDesc* bindBufferMemoryDescs, uint32_t bindBufferMemoryDescNum) {
-    if (!bindBufferMemoryDescNum)
-        return Result::SUCCESS;
-
-    DeviceD3D12& deviceD3D12 = ((BufferD3D12*)bindBufferMemoryDescs->buffer)->GetDevice();
-    return deviceD3D12.BindBufferMemory(bindBufferMemoryDescs, bindBufferMemoryDescNum);
+    return BindBufferMemoryD3D12(bindBufferMemoryDescs, bindBufferMemoryDescNum);
 }
 
 static Result NRI_CALL BindTextureMemory(const BindTextureMemoryDesc* bindTextureMemoryDescs, uint32_t bindTextureMemoryDescNum) {
-    if (!bindTextureMemoryDescNum)
-        return Result::SUCCESS;
-
-    DeviceD3D12& deviceD3D12 = ((TextureD3D12*)bindTextureMemoryDescs->texture)->GetDevice();
-    return deviceD3D12.BindTextureMemory(bindTextureMemoryDescs, bindTextureMemoryDescNum);
+    return BindTextureMemoryD3D12(bindTextureMemoryDescs, bindTextureMemoryDescNum);
 }
 
 static void NRI_CALL GetBufferMemoryDesc2(const Device& device, const BufferDesc& bufferDesc, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) {
@@ -612,7 +610,7 @@ static void* NRI_CALL GetCommandBufferNativeObject(const CommandBuffer* commandB
     if (!commandBuffer)
         return nullptr;
 
-    return (ID3D12GraphicsCommandList*)(*(CommandBufferD3D12*)commandBuffer);
+    return (ID3D12CommandList*)(*(CommandBufferD3D12*)commandBuffer);
 }
 
 static uint64_t NRI_CALL GetBufferNativeObject(const Buffer* buffer) {
@@ -963,19 +961,11 @@ static void NRI_CALL GetMicromapMemoryDesc(const Micromap& micromap, MemoryLocat
 }
 
 static Result NRI_CALL BindAccelerationStructureMemory(const BindAccelerationStructureMemoryDesc* bindAccelerationStructureMemoryDescs, uint32_t bindAccelerationStructureMemoryDescNum) {
-    if (!bindAccelerationStructureMemoryDescNum)
-        return Result::SUCCESS;
-
-    DeviceD3D12& deviceD3D12 = ((AccelerationStructureD3D12*)bindAccelerationStructureMemoryDescs->accelerationStructure)->GetDevice();
-    return deviceD3D12.BindAccelerationStructureMemory(bindAccelerationStructureMemoryDescs, bindAccelerationStructureMemoryDescNum);
+    return BindAccelerationStructureMemoryD3D12(bindAccelerationStructureMemoryDescs, bindAccelerationStructureMemoryDescNum);
 }
 
 static Result NRI_CALL BindMicromapMemory(const BindMicromapMemoryDesc* bindMicromapMemoryDescs, uint32_t bindMicromapMemoryDescNum) {
-    if (!bindMicromapMemoryDescNum)
-        return Result::SUCCESS;
-
-    DeviceD3D12& deviceD3D12 = ((MicromapD3D12*)bindMicromapMemoryDescs->micromap)->GetDevice();
-    return deviceD3D12.BindMicromapMemory(bindMicromapMemoryDescs, bindMicromapMemoryDescNum);
+    return BindMicromapMemoryD3D12(bindMicromapMemoryDescs, bindMicromapMemoryDescNum);
 }
 
 static void NRI_CALL GetAccelerationStructureMemoryDesc2(const Device& device, const AccelerationStructureDesc& accelerationStructureDesc, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) {
@@ -1150,6 +1140,123 @@ Result DeviceD3D12::FillFunctionTable(RayTracingInterface& table) const {
     table.CmdCopyMicromap = ::CmdCopyMicromap;
     table.GetAccelerationStructureNativeObject = ::GetAccelerationStructureNativeObject;
     table.GetMicromapNativeObject = ::GetMicromapNativeObject;
+
+    return Result::SUCCESS;
+}
+
+#pragma endregion
+
+//============================================================================================================================================================================================
+#pragma region[  Video  ]
+
+static Result NRI_CALL GetVideoCapabilities(const Device& device, const VideoSessionDesc& videoSessionDesc, VideoCapabilities& videoCapabilities) {
+    return GetVideoCapabilities((DeviceD3D12&)device, videoSessionDesc, videoCapabilities);
+}
+
+static Result NRI_CALL GetVideoAV1Capabilities(const Device& device, const VideoSessionDesc& videoSessionDesc, VideoAV1Capabilities& videoAV1Capabilities) {
+    return GetVideoAV1Capabilities((DeviceD3D12&)device, videoSessionDesc, videoAV1Capabilities);
+}
+
+static Result NRI_CALL CreateVideoSession(Device& device, const VideoSessionDesc& videoSessionDesc, VideoSession*& videoSession) {
+    return ((DeviceD3D12&)device).CreateImplementation<VideoSessionD3D12>(videoSession, videoSessionDesc);
+}
+
+static void NRI_CALL DestroyVideoSession(VideoSession* videoSession) {
+    Destroy((VideoSessionD3D12*)videoSession);
+}
+
+static void NRI_CALL ResetVideoSession(VideoSession&) {
+}
+
+static Result NRI_CALL CreateVideoSessionParameters(Device& device, const VideoSessionParametersDesc& videoSessionParametersDesc, VideoSessionParameters*& videoSessionParameters) {
+    return ((DeviceD3D12&)device).CreateImplementation<VideoSessionParametersD3D12>(videoSessionParameters, videoSessionParametersDesc);
+}
+
+static void NRI_CALL DestroyVideoSessionParameters(VideoSessionParameters* videoSessionParameters) {
+    Destroy((VideoSessionParametersD3D12*)videoSessionParameters);
+}
+
+static Result NRI_CALL CreateVideoPicture(Device& device, const VideoPictureDesc& videoPictureDesc, VideoPicture*& videoPicture) {
+    return ((DeviceD3D12&)device).CreateImplementation<VideoPictureD3D12>(videoPicture, videoPictureDesc);
+}
+
+static void NRI_CALL DestroyVideoPicture(VideoPicture* videoPicture) {
+    Destroy((VideoPictureD3D12*)videoPicture);
+}
+
+static constexpr std::array<AccessLayoutStage, (size_t)VideoPictureRole::MAX_NUM> g_VideoPictureStates = {
+    AccessLayoutStage{AccessBits::VIDEO_DECODE_WRITE, Layout::VIDEO_DECODE_DST, StageBits::VIDEO_DECODE}, // DECODE_OUTPUT
+    AccessLayoutStage{AccessBits::VIDEO_DECODE_READ, Layout::VIDEO_DECODE_DPB, StageBits::VIDEO_DECODE},  // DECODE_REFERENCE
+    AccessLayoutStage{AccessBits::VIDEO_DECODE_WRITE, Layout::VIDEO_DECODE_DPB, StageBits::VIDEO_DECODE}, // DECODE_SETUP
+    AccessLayoutStage{AccessBits::VIDEO_DECODE_WRITE, Layout::VIDEO_DECODE_DST, StageBits::VIDEO_DECODE}, // DECODE_OUTPUT_AND_SETUP
+    AccessLayoutStage{AccessBits::VIDEO_ENCODE_READ, Layout::VIDEO_ENCODE_SRC, StageBits::VIDEO_ENCODE},  // ENCODE_INPUT
+    AccessLayoutStage{AccessBits::VIDEO_ENCODE_READ, Layout::VIDEO_ENCODE_DPB, StageBits::VIDEO_ENCODE},  // ENCODE_REFERENCE
+    AccessLayoutStage{AccessBits::VIDEO_ENCODE_WRITE, Layout::VIDEO_ENCODE_DPB, StageBits::VIDEO_ENCODE}, // ENCODE_RECONSTRUCTED
+};
+NRI_VALIDATE_ARRAY_BY_FIELD(g_VideoPictureStates, access);
+
+static Result NRI_CALL GetVideoPictureState(const VideoPicture&, VideoPictureRole role, VideoPictureState& state) {
+    state.required = g_VideoPictureStates[(size_t)role];
+    state.videoQueueAfter = {AccessBits::NONE, Layout::GENERAL, StageBits::NONE};
+    state.consumerQueueBefore = state.videoQueueAfter;
+    state.transitionOnVideoQueue = true;
+
+    return Result::SUCCESS;
+}
+
+static Result NRI_CALL WriteVideoAnnexBParameterSets(VideoAnnexBParameterSetsDesc& annexBParameterSetsDesc) {
+    return video::WriteAnnexBParameterSets(annexBParameterSetsDesc);
+}
+
+static Result NRI_CALL WriteVideoAnnexBEndOfStream(VideoAnnexBEndOfStreamDesc& annexBEndOfStreamDesc) {
+    return video::WriteAnnexBEndOfStream(annexBEndOfStreamDesc);
+}
+
+static Result NRI_CALL WriteVideoAV1ObuHeaders(VideoAV1ObuHeadersDesc& av1ObuHeadersDesc) {
+    return video::WriteAV1ObuHeaders(av1ObuHeadersDesc);
+}
+
+static void NRI_CALL CmdDecodeVideo(CommandBuffer& commandBuffer, const VideoDecodeDesc& videoDecodeDesc) {
+    ((CommandBufferD3D12&)commandBuffer).DecodeVideo(videoDecodeDesc);
+}
+
+static void NRI_CALL CmdEncodeVideo(CommandBuffer& commandBuffer, const VideoEncodeDesc& videoEncodeDesc) {
+    ((CommandBufferD3D12&)commandBuffer).EncodeVideo(videoEncodeDesc);
+}
+
+static void NRI_CALL CmdResolveVideoEncodeFeedback(CommandBuffer&, VideoSession&, Buffer&, uint64_t) {
+}
+
+static Result NRI_CALL GetVideoEncodeFeedback(VideoSession&, Buffer& resolvedMetadataReadback, uint64_t resolvedMetadataOffset, VideoEncodeFeedback& feedback) {
+    return GetVideoEncodeFeedback((BufferD3D12&)resolvedMetadataReadback, resolvedMetadataOffset, feedback);
+}
+
+static Result NRI_CALL GetVideoAV1EncodeDecodeInfo(VideoSession&, Buffer& resolvedMetadataReadback, uint64_t resolvedMetadataOffset, const VideoAV1EncodeDecodeInfoDesc& desc, VideoAV1EncodeDecodeInfo& info) {
+    return GetVideoAV1EncodeDecodeInfo((BufferD3D12&)resolvedMetadataReadback, resolvedMetadataOffset, desc, info);
+}
+
+Result DeviceD3D12::FillFunctionTable(VideoInterface& table) const {
+    if (m_Desc.adapterDesc.queueNum[(size_t)QueueType::VIDEO_DECODE] == 0 && m_Desc.adapterDesc.queueNum[(size_t)QueueType::VIDEO_ENCODE] == 0)
+        return Result::UNSUPPORTED;
+
+    table.GetVideoCapabilities = ::GetVideoCapabilities;
+    table.GetVideoAV1Capabilities = ::GetVideoAV1Capabilities;
+    table.CreateVideoSession = ::CreateVideoSession;
+    table.DestroyVideoSession = ::DestroyVideoSession;
+    table.ResetVideoSession = ::ResetVideoSession;
+    table.CreateVideoSessionParameters = ::CreateVideoSessionParameters;
+    table.DestroyVideoSessionParameters = ::DestroyVideoSessionParameters;
+    table.CreateVideoPicture = ::CreateVideoPicture;
+    table.DestroyVideoPicture = ::DestroyVideoPicture;
+    table.GetVideoPictureState = ::GetVideoPictureState;
+    table.WriteVideoAnnexBParameterSets = ::WriteVideoAnnexBParameterSets;
+    table.WriteVideoAnnexBEndOfStream = ::WriteVideoAnnexBEndOfStream;
+    table.WriteVideoAV1ObuHeaders = ::WriteVideoAV1ObuHeaders;
+    table.CmdDecodeVideo = ::CmdDecodeVideo;
+    table.CmdEncodeVideo = ::CmdEncodeVideo;
+    table.CmdResolveVideoEncodeFeedback = ::CmdResolveVideoEncodeFeedback;
+    table.GetVideoEncodeFeedback = ::GetVideoEncodeFeedback;
+    table.GetVideoAV1EncodeDecodeInfo = ::GetVideoAV1EncodeDecodeInfo;
 
     return Result::SUCCESS;
 }

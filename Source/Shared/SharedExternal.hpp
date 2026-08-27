@@ -55,6 +55,9 @@ constexpr std::array<DxgiFormat, (size_t)Format::MAX_NUM> g_dxgiFormats = {{
     {DXGI_FORMAT_R10G10B10A2_TYPELESS, DXGI_FORMAT_R10G10B10A2_UINT},      // R10_G10_B10_A2_UINT
     {DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R11G11B10_FLOAT},            // R11_G11_B10_UFLOAT
     {DXGI_FORMAT_R9G9B9E5_SHAREDEXP, DXGI_FORMAT_R9G9B9E5_SHAREDEXP},      // R9_G9_B9_E5_UFLOAT
+    {DXGI_FORMAT_NV12, DXGI_FORMAT_NV12},                                  // NV12_UNORM
+    {DXGI_FORMAT_P010, DXGI_FORMAT_P010},                                  // P010_UNORM
+    {DXGI_FORMAT_P016, DXGI_FORMAT_P016},                                  // P016_UNORM
     {DXGI_FORMAT_BC1_TYPELESS, DXGI_FORMAT_BC1_UNORM},                     // BC1_RGBA_UNORM
     {DXGI_FORMAT_BC1_TYPELESS, DXGI_FORMAT_BC1_UNORM_SRGB},                // BC1_RGBA_SRGB
     {DXGI_FORMAT_BC2_TYPELESS, DXGI_FORMAT_BC2_UNORM},                     // BC2_RGBA_UNORM
@@ -114,50 +117,12 @@ constexpr std::array<DxgiFormat, (size_t)Format::MAX_NUM> g_dxgiFormats = {{
 }};
 NRI_VALIDATE_ARRAY_BY_FIELD(g_dxgiFormats, typeless);
 
-const DxgiFormat& nri::GetDxgiFormat(Format format) {
-    return g_dxgiFormats[(size_t)format];
-}
+// Compute the overlay area of two rectangles, A and B:
+//  (ax1, ay1) = left-top coordinates of A; (ax2, ay2) = right-bottom coordinates of A
+//  (bx1, by1) = left-top coordinates of B; (bx2, by2) = right-bottom coordinates of B
 
-Result nri::GetResultFromHRESULT(long result) {
-    if (SUCCEEDED(result))
-        return Result::SUCCESS;
-
-    switch (result) {
-        case E_INVALIDARG:
-        case E_POINTER:
-        case E_HANDLE:
-            return Result::INVALID_ARGUMENT;
-
-        case DXGI_ERROR_UNSUPPORTED:
-            return Result::UNSUPPORTED;
-
-        case DXGI_ERROR_DEVICE_REMOVED:
-        case DXGI_ERROR_DEVICE_RESET:
-        case DXGI_ERROR_DRIVER_INTERNAL_ERROR:
-        case DXGI_ERROR_DEVICE_HUNG:
-            return Result::DEVICE_LOST;
-
-        case E_NOINTERFACE:
-        case D3D12_ERROR_INVALID_REDIST:
-        case DXGI_ERROR_SDK_COMPONENT_MISSING:
-            return Result::INVALID_SDK;
-
-        case E_OUTOFMEMORY:
-        case DXGI_ERROR_REMOTE_OUTOFMEMORY:
-        case DXGI_ERROR_HW_PROTECTION_OUTOFMEMORY:
-            return Result::OUT_OF_MEMORY;
-
-        case D3D12_ERROR_DRIVER_VERSION_MISMATCH:
-        case D3D12_ERROR_ADAPTER_NOT_FOUND:
-            return Result::OUT_OF_DATE;
-
-        default:
-            return Result::FAILURE;
-    }
-}
-
-uint32_t nri::NRIFormatToDXGIFormat(Format format) {
-    return g_dxgiFormats[(size_t)format].typed;
+static inline int32_t ComputeIntersectionArea(int32_t ax1, int32_t ay1, int32_t ax2, int32_t ay2, int32_t bx1, int32_t by1, int32_t bx2, int32_t by2) {
+    return std::max(0, std::min(ax2, bx2) - std::max(ax1, bx1)) * std::max(0, std::min(ay2, by2) - std::max(ay1, by1));
 }
 
 // Returns true if this is an integrated display panel e.g. the screen attached to tablets or laptops
@@ -285,12 +250,50 @@ static float GetSdrLuminance(void* hMonitor) {
     return nits;
 }
 
-// Compute the overlay area of two rectangles, A and B:
-//  (ax1, ay1) = left-top coordinates of A; (ax2, ay2) = right-bottom coordinates of A
-//  (bx1, by1) = left-top coordinates of B; (bx2, by2) = right-bottom coordinates of B
+const DxgiFormat& nri::GetDxgiFormat(Format format) {
+    return g_dxgiFormats[(size_t)format];
+}
 
-static inline int32_t ComputeIntersectionArea(int32_t ax1, int32_t ay1, int32_t ax2, int32_t ay2, int32_t bx1, int32_t by1, int32_t bx2, int32_t by2) {
-    return std::max(0, std::min(ax2, bx2) - std::max(ax1, bx1)) * std::max(0, std::min(ay2, by2) - std::max(ay1, by1));
+Result nri::GetResultFromHRESULT(long result) {
+    if (SUCCEEDED(result))
+        return Result::SUCCESS;
+
+    switch (result) {
+        case E_INVALIDARG:
+        case E_POINTER:
+        case E_HANDLE:
+            return Result::INVALID_ARGUMENT;
+
+        case DXGI_ERROR_UNSUPPORTED:
+            return Result::UNSUPPORTED;
+
+        case DXGI_ERROR_DEVICE_REMOVED:
+        case DXGI_ERROR_DEVICE_RESET:
+        case DXGI_ERROR_DRIVER_INTERNAL_ERROR:
+        case DXGI_ERROR_DEVICE_HUNG:
+            return Result::DEVICE_LOST;
+
+        case E_NOINTERFACE:
+        case D3D12_ERROR_INVALID_REDIST:
+        case DXGI_ERROR_SDK_COMPONENT_MISSING:
+            return Result::INVALID_SDK;
+
+        case E_OUTOFMEMORY:
+        case DXGI_ERROR_REMOTE_OUTOFMEMORY:
+        case DXGI_ERROR_HW_PROTECTION_OUTOFMEMORY:
+            return Result::OUT_OF_MEMORY;
+
+        case D3D12_ERROR_DRIVER_VERSION_MISMATCH:
+        case D3D12_ERROR_ADAPTER_NOT_FOUND:
+            return Result::OUT_OF_DATE;
+
+        default:
+            return Result::FAILURE;
+    }
+}
+
+uint32_t nri::NRIFormatToDXGIFormat(Format format) {
+    return g_dxgiFormats[(size_t)format].typed;
 }
 
 Result DisplayDescHelper::GetDisplayDesc(void* hwnd, DisplayDesc& displayDesc) {
@@ -544,6 +547,9 @@ constexpr std::array<FormatProps, (size_t)Format::MAX_NUM> g_formatProps = {{
     {"R10_G10_B10_A2_UINT",     Format::R10_G10_B10_A2_UINT,       10, 10, 10, 2,  4,  1,  1,  _, _, _, _, _, X, X, _, _, _, _}, // R10_G10_B10_A2_UINT
     {"R11_G11_B10_UFLOAT",      Format::R11_G11_B10_UFLOAT,        11, 11, 10, 0,  4,  1,  1,  _, _, _, _, X, X, _, _, _, _, _}, // R11_G11_B10_UFLOAT
     {"R9_G9_B9_E5_UFLOAT",      Format::R9_G9_B9_E5_UFLOAT,        9,  9,  9,  5,  4,  1,  1,  _, _, _, X, X, X, _, _, _, _, _}, // R9_G9_B9_E5_UFLOAT
+    {"NV12_UNORM",              Format::NV12_UNORM,                8,  8,  8,  0,  6,  2,  2,  _, _, _, _, _, _, _, X, _, _, _}, // NV12_UNORM
+    {"P010_UNORM",              Format::P010_UNORM,                10, 10, 10, 0,  12, 2,  2,  _, _, _, _, _, _, _, X, _, _, _}, // P010_UNORM
+    {"P016_UNORM",              Format::P016_UNORM,                16, 16, 16, 0,  12, 2,  2,  _, _, _, _, _, _, _, X, _, _, _}, // P016_UNORM
     //                                                             r   g   b   a   s   w   h   b   c  d  e  f  p  i  n  s  s  s
     {"BC1_RGBA_UNORM",          Format::BC1_RGBA_UNORM,            5,  6,  5,  1,  8,  4,  4,  _, X, _, _, _, _, _, X, _, _, _}, // BC1_RGBA_UNORM
     {"BC1_RGBA_SRGB",           Format::BC1_RGBA_SRGB,             5,  6,  5,  1,  8,  4,  4,  _, X, _, _, _, _, _, _, _, X, _}, // BC1_RGBA_SRGB
@@ -720,9 +726,9 @@ constexpr std::array<Format, 116> NRI_FORMAT_TABLE = {
     Format::UNKNOWN,                // DXGI_FORMAT_AYUV = 100
     Format::UNKNOWN,                // DXGI_FORMAT_Y410 = 101
     Format::UNKNOWN,                // DXGI_FORMAT_Y416 = 102
-    Format::UNKNOWN,                // DXGI_FORMAT_NV12 = 103
-    Format::UNKNOWN,                // DXGI_FORMAT_P010 = 104
-    Format::UNKNOWN,                // DXGI_FORMAT_P016 = 105
+    Format::NV12_UNORM,             // DXGI_FORMAT_NV12 = 103
+    Format::P010_UNORM,             // DXGI_FORMAT_P010 = 104
+    Format::P016_UNORM,             // DXGI_FORMAT_P016 = 105
     Format::UNKNOWN,                // DXGI_FORMAT_420_OPAQUE = 106
     Format::UNKNOWN,                // DXGI_FORMAT_YUY2 = 107
     Format::UNKNOWN,                // DXGI_FORMAT_Y210 = 108
@@ -886,6 +892,12 @@ Format nri::VKFormatToNRIFormat(uint32_t format) {
 #if NRI_ENABLE_VK_SUPPORT
     if (format < VK_FORMAT_TABLE.size())
         return VK_FORMAT_TABLE[format];
+    else if (format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+        return Format::NV12_UNORM;
+    else if (format == VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16)
+        return Format::P010_UNORM;
+    else if (format == VK_FORMAT_G16_B16R16_2PLANE_420_UNORM)
+        return Format::P016_UNORM;
     else if (format == VK_FORMAT_A4R4G4B4_UNORM_PACK16)
         return Format::B4_G4_R4_A4_UNORM;
 #endif

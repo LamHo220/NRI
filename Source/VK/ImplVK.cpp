@@ -23,6 +23,9 @@
 #include "SwapChainVK.h"
 #include "TextureVK.h"
 #include "TransferContextVK.h"
+#include "VideoPictureVK.h"
+#include "VideoSessionParametersVK.h"
+#include "VideoSessionVK.h"
 
 #include "HelperInterface.h"
 #include "ImguiInterface.h"
@@ -39,7 +42,6 @@ using namespace nri;
 #include "DescriptorPoolVK.hpp"
 #include "DescriptorSetVK.hpp"
 #include "DescriptorVK.hpp"
-#include "TransferContextVK.hpp"
 #include "DeviceVK.hpp"
 #include "FenceVK.hpp"
 #include "MemoryVK.hpp"
@@ -51,6 +53,10 @@ using namespace nri;
 #include "QueueVK.hpp"
 #include "SwapChainVK.hpp"
 #include "TextureVK.hpp"
+#include "TransferContextVK.hpp"
+#include "VideoPictureVK.hpp"
+#include "VideoSessionParametersVK.hpp"
+#include "VideoSessionVK.hpp"
 
 Result CreateDeviceVK(const DeviceCreationDesc& desc, const DeviceCreationVKDesc& descVK, DeviceBase*& device) {
     DeviceVK* impl = Allocate<DeviceVK>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks);
@@ -1139,6 +1145,131 @@ Result DeviceVK::FillFunctionTable(RayTracingInterface& table) const {
     table.CmdCopyMicromap = ::CmdCopyMicromap;
     table.GetAccelerationStructureNativeObject = ::GetAccelerationStructureNativeObject;
     table.GetMicromapNativeObject = ::GetMicromapNativeObject;
+
+    return Result::SUCCESS;
+}
+
+#pragma endregion
+
+//============================================================================================================================================================================================
+#pragma region[  Video  ]
+
+static Result NRI_CALL GetVideoCapabilities(const Device& device, const VideoSessionDesc& videoSessionDesc, VideoCapabilities& videoCapabilities) {
+    return GetVideoCapabilities((DeviceVK&)device, videoSessionDesc, videoCapabilities);
+}
+
+static Result NRI_CALL GetVideoAV1Capabilities(const Device& device, const VideoSessionDesc& videoSessionDesc, VideoAV1Capabilities& videoAV1Capabilities) {
+    return GetVideoAV1Capabilities((DeviceVK&)device, videoSessionDesc, videoAV1Capabilities);
+}
+
+static Result NRI_CALL CreateVideoSession(Device& device, const VideoSessionDesc& videoSessionDesc, VideoSession*& videoSession) {
+    return ((DeviceVK&)device).CreateImplementation<VideoSessionVK>(videoSession, videoSessionDesc);
+}
+
+static void NRI_CALL DestroyVideoSession(VideoSession* videoSession) {
+    Destroy((VideoSessionVK*)videoSession);
+}
+
+static void NRI_CALL ResetVideoSession(VideoSession& videoSession) {
+    ((VideoSessionVK&)videoSession).Reset();
+}
+
+static Result NRI_CALL CreateVideoSessionParameters(Device& device, const VideoSessionParametersDesc& videoSessionParametersDesc, VideoSessionParameters*& videoSessionParameters) {
+    return ((DeviceVK&)device).CreateImplementation<VideoSessionParametersVK>(videoSessionParameters, videoSessionParametersDesc);
+}
+
+static void NRI_CALL DestroyVideoSessionParameters(VideoSessionParameters* videoSessionParameters) {
+    Destroy((VideoSessionParametersVK*)videoSessionParameters);
+}
+
+static Result NRI_CALL CreateVideoPicture(Device& device, const VideoPictureDesc& videoPictureDesc, VideoPicture*& videoPicture) {
+    return ((DeviceVK&)device).CreateImplementation<VideoPictureVK>(videoPicture, videoPictureDesc);
+}
+
+static void NRI_CALL DestroyVideoPicture(VideoPicture* videoPicture) {
+    Destroy((VideoPictureVK*)videoPicture);
+}
+
+static constexpr std::array<AccessLayoutStage, (size_t)VideoPictureRole::MAX_NUM> g_VideoPictureStates = {
+    AccessLayoutStage{AccessBits::VIDEO_DECODE_WRITE, Layout::VIDEO_DECODE_DST, StageBits::VIDEO_DECODE}, // DECODE_OUTPUT
+    AccessLayoutStage{AccessBits::VIDEO_DECODE_READ, Layout::VIDEO_DECODE_DPB, StageBits::VIDEO_DECODE},  // DECODE_REFERENCE
+    AccessLayoutStage{AccessBits::VIDEO_DECODE_WRITE, Layout::VIDEO_DECODE_DPB, StageBits::VIDEO_DECODE}, // DECODE_SETUP
+    AccessLayoutStage{AccessBits::VIDEO_DECODE_WRITE, Layout::VIDEO_DECODE_DPB, StageBits::VIDEO_DECODE}, // DECODE_OUTPUT_AND_SETUP
+    AccessLayoutStage{AccessBits::VIDEO_ENCODE_READ, Layout::VIDEO_ENCODE_SRC, StageBits::VIDEO_ENCODE},  // ENCODE_INPUT
+    AccessLayoutStage{AccessBits::VIDEO_ENCODE_READ, Layout::VIDEO_ENCODE_DPB, StageBits::VIDEO_ENCODE},  // ENCODE_REFERENCE
+    AccessLayoutStage{AccessBits::VIDEO_ENCODE_WRITE, Layout::VIDEO_ENCODE_DPB, StageBits::VIDEO_ENCODE}, // ENCODE_RECONSTRUCTED
+};
+NRI_VALIDATE_ARRAY_BY_FIELD(g_VideoPictureStates, access);
+
+static Result NRI_CALL GetVideoPictureState(const VideoPicture&, VideoPictureRole role, VideoPictureState& state) {
+    state = {};
+    state.required = g_VideoPictureStates[(size_t)role];
+
+    if (state.required.stages == StageBits::VIDEO_DECODE)
+        state.consumerQueueBefore = {AccessBits::NONE, state.required.layout, StageBits::ALL};
+    else {
+        state.videoQueueAfter = {AccessBits::NONE, Layout::GENERAL, StageBits::NONE};
+        state.consumerQueueBefore = state.videoQueueAfter;
+        state.transitionOnVideoQueue = true;
+    }
+
+    return Result::SUCCESS;
+}
+
+static Result NRI_CALL WriteVideoAnnexBParameterSets(VideoAnnexBParameterSetsDesc& annexBParameterSetsDesc) {
+    return video::WriteAnnexBParameterSets(annexBParameterSetsDesc);
+}
+
+static Result NRI_CALL WriteVideoAnnexBEndOfStream(VideoAnnexBEndOfStreamDesc& annexBEndOfStreamDesc) {
+    return video::WriteAnnexBEndOfStream(annexBEndOfStreamDesc);
+}
+
+static Result NRI_CALL WriteVideoAV1ObuHeaders(VideoAV1ObuHeadersDesc& av1ObuHeadersDesc) {
+    return video::WriteAV1ObuHeaders(av1ObuHeadersDesc);
+}
+
+static void NRI_CALL CmdDecodeVideo(CommandBuffer& commandBuffer, const VideoDecodeDesc& videoDecodeDesc) {
+    ((CommandBufferVK&)commandBuffer).DecodeVideo(videoDecodeDesc);
+}
+
+static void NRI_CALL CmdEncodeVideo(CommandBuffer& commandBuffer, const VideoEncodeDesc& videoEncodeDesc) {
+    ((CommandBufferVK&)commandBuffer).EncodeVideo(videoEncodeDesc);
+}
+
+static void NRI_CALL CmdResolveVideoEncodeFeedback(CommandBuffer& commandBuffer, VideoSession& videoSession, Buffer& resolvedMetadata, uint64_t resolvedMetadataOffset) {
+    ((CommandBufferVK&)commandBuffer).ResolveVideoEncodeFeedback(videoSession, resolvedMetadata, resolvedMetadataOffset);
+}
+
+static Result NRI_CALL GetVideoEncodeFeedback(VideoSession& videoSession, Buffer& resolvedMetadataReadback, uint64_t resolvedMetadataOffset, VideoEncodeFeedback& feedback) {
+    return ((VideoSessionVK&)videoSession).GetEncodeFeedback((BufferVK&)resolvedMetadataReadback, resolvedMetadataOffset, feedback);
+}
+
+static Result NRI_CALL GetVideoAV1EncodeDecodeInfo(VideoSession& videoSession, Buffer& resolvedMetadataReadback, uint64_t resolvedMetadataOffset, const VideoAV1EncodeDecodeInfoDesc& desc, VideoAV1EncodeDecodeInfo& info) {
+    return ((VideoSessionVK&)videoSession).GetEncodeAV1DecodeInfo((BufferVK&)resolvedMetadataReadback, resolvedMetadataOffset, desc, info);
+}
+
+Result DeviceVK::FillFunctionTable(VideoInterface& table) const {
+    if (!m_IsSupported.videoMaintenance1 || (m_Desc.adapterDesc.queueNum[(size_t)QueueType::VIDEO_DECODE] == 0 && m_Desc.adapterDesc.queueNum[(size_t)QueueType::VIDEO_ENCODE] == 0))
+        return Result::UNSUPPORTED;
+
+    table.GetVideoCapabilities = ::GetVideoCapabilities;
+    table.GetVideoAV1Capabilities = ::GetVideoAV1Capabilities;
+    table.CreateVideoSession = ::CreateVideoSession;
+    table.DestroyVideoSession = ::DestroyVideoSession;
+    table.ResetVideoSession = ::ResetVideoSession;
+    table.CreateVideoSessionParameters = ::CreateVideoSessionParameters;
+    table.DestroyVideoSessionParameters = ::DestroyVideoSessionParameters;
+    table.CreateVideoPicture = ::CreateVideoPicture;
+    table.DestroyVideoPicture = ::DestroyVideoPicture;
+    table.GetVideoPictureState = ::GetVideoPictureState;
+    table.WriteVideoAnnexBParameterSets = ::WriteVideoAnnexBParameterSets;
+    table.WriteVideoAnnexBEndOfStream = ::WriteVideoAnnexBEndOfStream;
+    table.WriteVideoAV1ObuHeaders = ::WriteVideoAV1ObuHeaders;
+    table.CmdDecodeVideo = ::CmdDecodeVideo;
+    table.CmdEncodeVideo = ::CmdEncodeVideo;
+    table.CmdResolveVideoEncodeFeedback = ::CmdResolveVideoEncodeFeedback;
+    table.GetVideoEncodeFeedback = ::GetVideoEncodeFeedback;
+    table.GetVideoAV1EncodeDecodeInfo = ::GetVideoAV1EncodeDecodeInfo;
 
     return Result::SUCCESS;
 }

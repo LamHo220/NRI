@@ -1,17 +1,17 @@
 // © 2021 NVIDIA Corporation
 
-DescriptorPoolVK::~DescriptorPoolVK() {
-    if (m_OwnsNativeObjects) {
-        const auto& vk = m_Device.GetDispatchTable();
-        vk.DestroyDescriptorPool(m_Device, m_Handle, m_Device.GetVkAllocationCallbacks());
-    }
-}
-
 static inline void AddDescriptorPoolSize(std::array<VkDescriptorPoolSize, 16>& poolSizes, uint32_t& poolSizeNum, VkDescriptorType type, uint32_t descriptorCount) {
     if (descriptorCount) {
         VkDescriptorPoolSize& poolSize = poolSizes[poolSizeNum++];
         poolSize.type = type;
         poolSize.descriptorCount = descriptorCount;
+    }
+}
+
+DescriptorPoolVK::~DescriptorPoolVK() {
+    if (m_OwnsNativeObjects) {
+        const auto& vk = m_Device.GetDispatchTable();
+        vk.DestroyDescriptorPool(m_Device, m_Handle, m_Device.GetVkAllocationCallbacks());
     }
 }
 

@@ -2,7 +2,7 @@
 
 constexpr uint32_t PRESENT_MODE_MAX_NUM = 16;
 
-constexpr VkPresentGravityFlagBitsKHR GetGravity(Gravity gravity) {
+static constexpr VkPresentGravityFlagBitsKHR GetGravity(Gravity gravity) {
     switch (gravity) {
         case Gravity::CENTERED:
             return VK_PRESENT_GRAVITY_CENTERED_BIT_KHR;

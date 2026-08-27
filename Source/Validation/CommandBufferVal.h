@@ -5,9 +5,10 @@
 namespace nri {
 
 struct CommandBufferVal final : public ObjectVal {
-    CommandBufferVal(DeviceVal& device, CommandBuffer* commandBuffer, bool isWrapped)
+    CommandBufferVal(DeviceVal& device, CommandBuffer* commandBuffer, QueueType queueType, bool isWrapped)
         : ObjectVal(device, commandBuffer)
         , m_DescriptorSets(device.GetStdAllocator())
+        , m_QueueType(queueType)
         , m_IsRecordingStarted(isWrapped)
         , m_IsWrapped(isWrapped) {
     }
@@ -90,6 +91,9 @@ struct CommandBufferVal final : public ObjectVal {
     void DispatchRaysIndirect(const Buffer& buffer, uint64_t offset);
     void DrawMeshTasks(const DrawMeshTasksDesc& drawMeshTasksDesc);
     void DrawMeshTasksIndirect(const Buffer& buffer, uint64_t offset, uint32_t drawNum, uint32_t stride, const Buffer* countBuffer, uint64_t countBufferOffset);
+    void DecodeVideo(const VideoDecodeDesc& videoDecodeDesc);
+    void EncodeVideo(const VideoEncodeDesc& videoEncodeDesc);
+    void ResolveVideoEncodeFeedback(VideoSession& videoSession, Buffer& resolvedMetadata, uint64_t resolvedMetadataOffset);
 
 private:
     void ValidateReadonlyDepthStencil();
@@ -101,6 +105,7 @@ private:
     PipelineVal* m_Pipeline = nullptr;
     uint32_t m_RenderTargetNum = 0;
     int32_t m_AnnotationStack = 0;
+    QueueType m_QueueType = QueueType::MAX_NUM;
     bool m_IsRecordingStarted = false;
     bool m_IsWrapped = false;
     bool m_IsRenderPass = false;

@@ -28,6 +28,8 @@ struct FenceWGPU final : public DebugNameBase {
 private:
     DeviceWGPU& m_Device;
     mutable Vector<FenceSubmissionWGPU> m_Submissions;
+    mutable std::mutex m_Mutex;
+    std::condition_variable m_ConditionVariable;
     uint64_t m_SubmittedValue = 0;
     mutable uint64_t m_CompletedValue = 0;
     bool m_IsSwapChainSemaphore = false;

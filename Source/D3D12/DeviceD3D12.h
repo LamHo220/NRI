@@ -136,6 +136,7 @@ struct DeviceD3D12 final : public DeviceBase {
     Result FillFunctionTable(LowLatencyInterface& table) const override;
     Result FillFunctionTable(MeshShaderInterface& table) const override;
     Result FillFunctionTable(RayTracingInterface& table) const override;
+    Result FillFunctionTable(VideoInterface& table) const override;
     Result FillFunctionTable(StreamerInterface& table) const override;
     Result FillFunctionTable(SwapChainInterface& table) const override;
     Result FillFunctionTable(UpscalerInterface& table) const override;
@@ -153,10 +154,6 @@ struct DeviceD3D12 final : public DeviceBase {
     Result WaitIdle();
     Result UploadHostMemoryToTexture(QueueD3D12& queue, const UploadHostMemoryToTextureDesc* copyDescs, uint32_t copyDescNum);
     Result ReadbackTextureToHostMemory(QueueD3D12& queue, const ReadbackTextureToHostMemoryDesc* copyDescs, uint32_t copyDescNum);
-    Result BindBufferMemory(const BindBufferMemoryDesc* bindBufferMemoryDescs, uint32_t bindBufferMemoryDescNum);
-    Result BindTextureMemory(const BindTextureMemoryDesc* bindTextureMemoryDescs, uint32_t bindTextureMemoryDescNum);
-    Result BindAccelerationStructureMemory(const BindAccelerationStructureMemoryDesc* bindAccelerationStructureMemoryDescs, uint32_t bindAccelerationStructureMemoryDescNum);
-    Result BindMicromapMemory(const BindMicromapMemoryDesc* bindMicromapMemoryDescs, uint32_t bindMicromapMemoryDescNum);
     FormatSupportBits GetFormatSupport(Format format) const;
 
 private:

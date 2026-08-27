@@ -1,24 +1,5 @@
 // © 2026 NVIDIA Corporation
 
-DescriptorSetWGPU::DescriptorSetWGPU(DeviceWGPU& device, const DescriptorSetMappingWGPU& mapping)
-    : m_Device(device)
-    , m_Mapping(mapping)
-    , m_Descriptors(device.GetStdAllocator())
-    , m_BindGroups(device.GetStdAllocator()) {
-    uint32_t descriptorNum = 0;
-    for (const DescriptorRangeMappingWGPU& range : mapping.ranges)
-        descriptorNum = std::max(descriptorNum, range.descriptorOffset + range.descriptorNum);
-
-    m_Descriptors.resize(descriptorNum);
-}
-
-DescriptorSetWGPU::~DescriptorSetWGPU() {
-    for (DescriptorSetBindGroupWGPU& cache : m_BindGroups) {
-        if (cache.bindGroup)
-            wgpuBindGroupRelease(cache.bindGroup);
-    }
-}
-
 static bool IsDescriptorCompatibleWithRange(const DescriptorRangeMappingWGPU& range, const DescriptorWGPU& descriptor) {
     const TextureDesc* textureDesc = descriptor.GetTextureDesc();
     if (!textureDesc) {
@@ -44,6 +25,25 @@ static bool IsDescriptorCompatibleWithRange(const DescriptorRangeMappingWGPU& ra
         return false;
 
     return GetTextureFormat(descriptor.GetFormat()) == range.storageTextureFormat && viewDimension == range.storageTextureViewDimension;
+}
+
+DescriptorSetWGPU::DescriptorSetWGPU(DeviceWGPU& device, const DescriptorSetMappingWGPU& mapping)
+    : m_Device(device)
+    , m_Mapping(mapping)
+    , m_Descriptors(device.GetStdAllocator())
+    , m_BindGroups(device.GetStdAllocator()) {
+    uint32_t descriptorNum = 0;
+    for (const DescriptorRangeMappingWGPU& range : mapping.ranges)
+        descriptorNum = std::max(descriptorNum, range.descriptorOffset + range.descriptorNum);
+
+    m_Descriptors.resize(descriptorNum);
+}
+
+DescriptorSetWGPU::~DescriptorSetWGPU() {
+    for (DescriptorSetBindGroupWGPU& cache : m_BindGroups) {
+        if (cache.bindGroup)
+            wgpuBindGroupRelease(cache.bindGroup);
+    }
 }
 
 void DescriptorSetWGPU::UpdateRange(uint32_t rangeIndex, uint32_t baseDescriptor, const Descriptor* const* descriptors, uint32_t descriptorNum) {

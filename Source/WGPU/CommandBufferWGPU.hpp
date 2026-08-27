@@ -1,5 +1,371 @@
 // © 2026 NVIDIA Corporation
 
+static uint32_t GetFormatComponentNum(Format format) {
+    const FormatProps& props = GetFormatProps(format);
+    uint32_t componentNum = 0;
+    componentNum += props.redBits ? 1 : 0;
+    componentNum += props.greenBits ? 1 : 0;
+    componentNum += props.blueBits ? 1 : 0;
+    componentNum += props.alphaBits ? 1 : 0;
+
+    return std::max(componentNum, 1u);
+}
+
+static const char* GetFormatScalarType(Format format) {
+    const FormatProps& props = GetFormatProps(format);
+    if (props.isInteger)
+        return props.isSigned ? "i32" : "u32";
+
+    return "f32";
+}
+
+static std::string GetFormatShaderType(Format format) {
+    const char* scalarType = GetFormatScalarType(format);
+    uint32_t componentNum = GetFormatComponentNum(format);
+    if (componentNum == 1)
+        return scalarType;
+
+    char type[32] = {};
+    snprintf(type, sizeof(type), "vec%u<%s>", componentNum, scalarType);
+
+    return type;
+}
+
+static std::string GetClearShaderValue(Format format) {
+    uint32_t componentNum = GetFormatComponentNum(format);
+    if (componentNum == 1)
+        return "c.color.x";
+    if (componentNum == 2)
+        return "c.color.xy";
+    if (componentNum == 3)
+        return "c.color.xyz";
+
+    return "c.color";
+}
+
+static std::string GetZeroShaderValue(Format format) {
+    std::string type = GetFormatShaderType(format);
+    return type + "(0)";
+}
+
+static PlaneBits GetFormatPlanes(Format format) {
+    const FormatProps& props = GetFormatProps(format);
+    if (props.isDepth && props.isStencil)
+        return PlaneBits::DEPTH | PlaneBits::STENCIL;
+    if (props.isDepth)
+        return PlaneBits::DEPTH;
+    if (props.isStencil)
+        return PlaneBits::STENCIL;
+
+    return PlaneBits::COLOR;
+}
+
+static PlaneBits NormalizeClearPlanes(PlaneBits planes, Format format) {
+    return planes == PlaneBits::ALL ? GetFormatPlanes(format) : planes;
+}
+
+static inline bool IsDepthStencilPlaneReadOnly(const DescriptorWGPU& descriptor, PlaneBits plane) {
+    PlaneBits planes = descriptor.GetTextureViewDesc().planes;
+    return planes != PlaneBits::ALL && (planes & plane) == 0;
+}
+
+static WGPUTextureView CreateDepthStencilView(const DescriptorWGPU& descriptor) {
+    const TextureWGPU* texture = descriptor.GetTexture();
+    if (!texture)
+        return nullptr;
+
+    const TextureDesc& textureDesc = texture->GetDesc();
+    const TextureViewDesc& viewDesc = descriptor.GetTextureViewDesc();
+
+    WGPUTextureViewDescriptor desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+    desc.format = GetTextureFormat(viewDesc.format == Format::UNKNOWN ? textureDesc.format : viewDesc.format);
+    desc.dimension = GetTextureViewDimension(viewDesc.type, textureDesc);
+    desc.baseMipLevel = viewDesc.mipOffset;
+    desc.mipLevelCount = viewDesc.mipNum == REMAINING ? WGPU_MIP_LEVEL_COUNT_UNDEFINED : viewDesc.mipNum;
+    desc.baseArrayLayer = viewDesc.layerOffset;
+    desc.arrayLayerCount = viewDesc.layerNum == REMAINING ? WGPU_ARRAY_LAYER_COUNT_UNDEFINED : viewDesc.layerNum;
+    desc.aspect = WGPUTextureAspect_All;
+
+    return wgpuTextureCreateView(*texture, &desc);
+}
+
+static WGPUShaderModule CreateShaderModule(DeviceWGPU& device, const std::string& source) {
+    WGPUShaderSourceWGSL wgsl = WGPU_SHADER_SOURCE_WGSL_INIT;
+    wgsl.code = {source.data(), source.size()};
+
+    WGPUShaderModuleDescriptor desc = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
+    desc.nextInChain = &wgsl.chain;
+
+    return wgpuDeviceCreateShaderModule(device, &desc);
+}
+
+static uint32_t DivideUp(uint32_t x, uint32_t y) {
+    return (x + y - 1) / y;
+}
+
+static const char* GetStorageTextureFormatName(Format format) {
+    switch (format) {
+        case Format::BGRA8_UNORM: return "bgra8unorm";
+        case Format::RGBA8_UNORM: return "rgba8unorm";
+        case Format::RGBA8_SNORM: return "rgba8snorm";
+        case Format::RGBA8_UINT: return "rgba8uint";
+        case Format::RGBA8_SINT: return "rgba8sint";
+        case Format::RGBA16_UINT: return "rgba16uint";
+        case Format::RGBA16_SINT: return "rgba16sint";
+        case Format::RGBA16_SFLOAT: return "rgba16float";
+        case Format::R32_UINT: return "r32uint";
+        case Format::R32_SINT: return "r32sint";
+        case Format::R32_SFLOAT: return "r32float";
+        case Format::RG32_UINT: return "rg32uint";
+        case Format::RG32_SINT: return "rg32sint";
+        case Format::RG32_SFLOAT: return "rg32float";
+        case Format::RGBA32_UINT: return "rgba32uint";
+        case Format::RGBA32_SINT: return "rgba32sint";
+        case Format::RGBA32_SFLOAT: return "rgba32float";
+        default: return nullptr;
+    }
+}
+
+static const char* GetStorageTextureDimensionName(WGPUTextureViewDimension dimension) {
+    switch (dimension) {
+        case WGPUTextureViewDimension_1D: return "1d";
+        case WGPUTextureViewDimension_2D: return "2d";
+        case WGPUTextureViewDimension_2DArray: return "2d_array";
+        case WGPUTextureViewDimension_3D: return "3d";
+        default: return nullptr;
+    }
+}
+
+static const char* GetStorageTextureValue(Format format) {
+    const FormatProps& props = GetFormatProps(format);
+    if (props.isInteger)
+        return props.isSigned ? "c.i" : "c.u";
+
+    return "c.f";
+}
+
+static void AppendStorageTextureStore(std::string& shaderSource, WGPUTextureViewDimension dimension, const char* value) {
+    switch (dimension) {
+        case WGPUTextureViewDimension_1D:
+            shaderSource +=
+                "    if (id.x >= c.width) {\n"
+                "        return;\n"
+                "    }\n"
+                "    textureStore(dst, i32(id.x), ";
+            shaderSource += value;
+            shaderSource += ");\n";
+            break;
+        case WGPUTextureViewDimension_2D:
+            shaderSource +=
+                "    if (id.x >= c.width || id.y >= c.height) {\n"
+                "        return;\n"
+                "    }\n"
+                "    textureStore(dst, vec2<i32>(id.xy), ";
+            shaderSource += value;
+            shaderSource += ");\n";
+            break;
+        case WGPUTextureViewDimension_2DArray:
+            shaderSource +=
+                "    if (id.x >= c.width || id.y >= c.height || id.z >= c.depth) {\n"
+                "        return;\n"
+                "    }\n"
+                "    textureStore(dst, vec2<i32>(id.xy), i32(id.z), ";
+            shaderSource += value;
+            shaderSource += ");\n";
+            break;
+        case WGPUTextureViewDimension_3D:
+            shaderSource +=
+                "    if (id.x >= c.width || id.y >= c.height || id.z >= c.depth) {\n"
+                "        return;\n"
+                "    }\n"
+                "    textureStore(dst, vec3<i32>(id.xyz), ";
+            shaderSource += value;
+            shaderSource += ");\n";
+            break;
+        default:
+            break;
+    }
+}
+
+static TextureRegionDesc GetWholeTextureRegion(const TextureDesc& textureDesc) {
+    TextureRegionDesc region = {};
+    region.width = WHOLE_SIZE;
+    region.height = WHOLE_SIZE;
+    region.depth = textureDesc.type == TextureType::TEXTURE_3D ? WHOLE_SIZE : textureDesc.layerNum;
+    region.planes = PlaneBits::ALL;
+
+    return region;
+}
+
+static void FillTexelCopyTexture(WGPUTexelCopyTextureInfo& out, const TextureWGPU& texture, const TextureRegionDesc& region) {
+    out = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+    out.texture = texture;
+    out.mipLevel = region.mipOffset;
+    out.origin.x = region.x;
+    out.origin.y = region.y;
+    out.origin.z = (uint32_t)region.z + region.layerOffset;
+    out.aspect = GetTextureAspect(region.planes);
+}
+
+static WGPUExtent3D GetCopySize(const TextureDesc& textureDesc, const TextureRegionDesc& region) {
+    WGPUExtent3D size = {};
+    size.width = region.width == WHOLE_SIZE ? GetDimension(GraphicsAPI::WGPU, textureDesc, 0, region.mipOffset) : region.width;
+    size.height = region.height == WHOLE_SIZE ? GetDimension(GraphicsAPI::WGPU, textureDesc, 1, region.mipOffset) : region.height;
+    if (textureDesc.type == TextureType::TEXTURE_3D)
+        size.depthOrArrayLayers = region.depth == WHOLE_SIZE ? (uint32_t)GetDimension(GraphicsAPI::WGPU, textureDesc, 2, region.mipOffset) : (uint32_t)GetCountOrOne(region.depth);
+    else
+        size.depthOrArrayLayers = region.depth == WHOLE_SIZE ? textureDesc.layerNum - region.layerOffset : (uint32_t)GetCountOrOne(region.depth);
+
+    return size;
+}
+
+static uint32_t GetClearChannelBits(const FormatProps& props, uint32_t channelIndex) {
+    switch (channelIndex) {
+        case 0:
+            return props.redBits;
+        case 1:
+            return props.greenBits;
+        case 2:
+            return props.blueBits;
+        case 3:
+            return props.alphaBits;
+        default:
+            return 0;
+    }
+}
+
+static uint32_t FloatToUnorm(float value, uint32_t bits) {
+    value = std::min(std::max(value, 0.0f), 1.0f);
+    uint32_t maxValue = bits == 32 ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+    return (uint32_t)(value * (float)maxValue + 0.5f);
+}
+
+static int32_t FloatToSnorm(float value, uint32_t bits) {
+    value = std::min(std::max(value, -1.0f), 1.0f);
+    int32_t maxValue = (1 << (bits - 1)) - 1;
+    int32_t minValue = -maxValue;
+    return std::min(std::max((int32_t)(value * (float)maxValue + (value >= 0.0f ? 0.5f : -0.5f)), minValue), maxValue);
+}
+
+static uint16_t FloatToFloat16(float value) {
+    uint32_t f = 0;
+    memcpy(&f, &value, sizeof(f));
+
+    uint32_t sign = (f >> 16) & 0x8000;
+    uint32_t mantissa = f & 0x007FFFFF;
+    int32_t exponent = (int32_t)((f >> 23) & 0xFF) - 127 + 15;
+
+    if (exponent <= 0) {
+        if (exponent < -10)
+            return (uint16_t)sign;
+
+        mantissa = (mantissa | 0x00800000) >> (1 - exponent);
+        return (uint16_t)(sign | ((mantissa + 0x00001000) >> 13));
+    }
+
+    if (exponent >= 31) {
+        if (mantissa)
+            return (uint16_t)(sign | 0x7E00);
+
+        return (uint16_t)(sign | 0x7C00);
+    }
+
+    return (uint16_t)(sign | ((uint32_t)exponent << 10) | ((mantissa + 0x00001000) >> 13));
+}
+
+static void StoreClearChannel(uint8_t*& dst, const Color& value, const FormatProps& props, uint32_t channelIndex) {
+    uint32_t bits = GetClearChannelBits(props, channelIndex);
+    if (!bits)
+        return;
+
+    uint32_t byteNum = bits / 8;
+    uint32_t bitsValue = 0;
+
+    if (props.isFloat) {
+        if (bits == 32)
+            memcpy(&bitsValue, &((&value.f.x)[channelIndex]), sizeof(float));
+        else if (bits == 16)
+            bitsValue = FloatToFloat16((&value.f.x)[channelIndex]);
+    } else if (props.isNorm) {
+        if (props.isSigned)
+            bitsValue = (uint32_t)FloatToSnorm((&value.f.x)[channelIndex], bits);
+        else
+            bitsValue = FloatToUnorm((&value.f.x)[channelIndex], bits);
+    } else if (props.isInteger) {
+        bitsValue = props.isSigned ? (uint32_t)(&value.i.x)[channelIndex] : (&value.ui.x)[channelIndex];
+    } else
+        memcpy(&bitsValue, &((&value.f.x)[channelIndex]), std::min<uint32_t>(byteNum, sizeof(bitsValue)));
+
+    memcpy(dst, &bitsValue, byteNum);
+    dst += byteNum;
+}
+
+static void FillClearPattern(uint8_t* dst, Format format, const Color& value) {
+    const FormatProps& props = GetFormatProps(format);
+    memset(dst, 0, props.stride);
+
+    if (props.isPacked || props.isCompressed)
+        return;
+
+    uint8_t* at = dst;
+    StoreClearChannel(at, value, props, 0);
+    StoreClearChannel(at, value, props, 1);
+    StoreClearChannel(at, value, props, 2);
+    StoreClearChannel(at, value, props, 3);
+}
+
+static uint32_t GetPatternWordPeriod(uint32_t stride) {
+    uint32_t a = stride;
+    uint32_t b = 4;
+    while (b) {
+        uint32_t t = a % b;
+        a = b;
+        b = t;
+    }
+
+    uint32_t gcd = a;
+    return std::max(stride / gcd, 1u);
+}
+
+static bool FillClearPatternWords(std::array<uint32_t, 4>& words, uint32_t& period, Format format, const Color& value) {
+    const FormatProps& props = GetFormatProps(format);
+    if (!props.stride || props.isPacked || props.isCompressed)
+        return false;
+
+    period = GetPatternWordPeriod(props.stride);
+    if (period > 4)
+        return false;
+
+    std::array<uint8_t, 16> pattern = {};
+    FillClearPattern(pattern.data(), format, value);
+
+    for (uint32_t i = 0; i < period; i++) {
+        std::array<uint8_t, 4> word = {};
+        for (uint32_t j = 0; j < 4; j++)
+            word[j] = pattern[(i * 4 + j) % props.stride];
+
+        memcpy(&words[i], word.data(), word.size());
+    }
+
+    return true;
+}
+
+static bool IsClearValueZero(const Color& value) {
+    return value.ui.x == 0 && value.ui.y == 0 && value.ui.z == 0 && value.ui.w == 0;
+}
+
+WGPUBuffer CreateTemporaryUploadBuffer(DeviceWGPU& device, uint64_t size, const void* data) {
+    WGPUBufferDescriptor desc = WGPU_BUFFER_DESCRIPTOR_INIT;
+    desc.size = Align(std::max<uint64_t>(size, 4), 4);
+    desc.usage = WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst;
+
+    WGPUBuffer buffer = wgpuDeviceCreateBuffer(device, &desc);
+    if (buffer && data)
+        device.WriteBuffer(buffer, 0, data, (size_t)size);
+
+    return buffer;
+}
+
 CommandBufferWGPU::~CommandBufferWGPU() {
     ReleaseRootBindGroups();
     ReleaseTransientObjects();
@@ -88,90 +454,6 @@ void CommandBufferWGPU::FlushDeferredEncoderAnnotationPops() {
         wgpuCommandEncoderPopDebugGroup(m_CommandEncoder);
 }
 
-static uint32_t GetFormatComponentNumWGPU(Format format) {
-    const FormatProps& props = GetFormatProps(format);
-    uint32_t componentNum = 0;
-    componentNum += props.redBits ? 1 : 0;
-    componentNum += props.greenBits ? 1 : 0;
-    componentNum += props.blueBits ? 1 : 0;
-    componentNum += props.alphaBits ? 1 : 0;
-
-    return std::max(componentNum, 1u);
-}
-
-static const char* GetFormatScalarTypeWGPU(Format format) {
-    const FormatProps& props = GetFormatProps(format);
-    if (props.isInteger)
-        return props.isSigned ? "i32" : "u32";
-
-    return "f32";
-}
-
-static std::string GetFormatShaderTypeWGPU(Format format) {
-    const char* scalarType = GetFormatScalarTypeWGPU(format);
-    uint32_t componentNum = GetFormatComponentNumWGPU(format);
-    if (componentNum == 1)
-        return scalarType;
-
-    char type[32] = {};
-    snprintf(type, sizeof(type), "vec%u<%s>", componentNum, scalarType);
-
-    return type;
-}
-
-static std::string GetClearShaderValueWGPU(Format format) {
-    uint32_t componentNum = GetFormatComponentNumWGPU(format);
-    if (componentNum == 1)
-        return "c.color.x";
-    if (componentNum == 2)
-        return "c.color.xy";
-    if (componentNum == 3)
-        return "c.color.xyz";
-
-    return "c.color";
-}
-
-static std::string GetZeroShaderValueWGPU(Format format) {
-    std::string type = GetFormatShaderTypeWGPU(format);
-    return type + "(0)";
-}
-
-static PlaneBits GetFormatPlanesWGPU(Format format) {
-    const FormatProps& props = GetFormatProps(format);
-    if (props.isDepth && props.isStencil)
-        return PlaneBits::DEPTH | PlaneBits::STENCIL;
-    if (props.isDepth)
-        return PlaneBits::DEPTH;
-    if (props.isStencil)
-        return PlaneBits::STENCIL;
-
-    return PlaneBits::COLOR;
-}
-
-static PlaneBits NormalizeClearPlanesWGPU(PlaneBits planes, Format format) {
-    return planes == PlaneBits::ALL ? GetFormatPlanesWGPU(format) : planes;
-}
-
-static WGPUTextureView CreateDepthStencilViewWGPU(const DescriptorWGPU& descriptor) {
-    const TextureWGPU* texture = descriptor.GetTexture();
-    if (!texture)
-        return nullptr;
-
-    const TextureDesc& textureDesc = texture->GetDesc();
-    const TextureViewDesc& viewDesc = descriptor.GetTextureViewDesc();
-
-    WGPUTextureViewDescriptor desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
-    desc.format = GetTextureFormat(viewDesc.format == Format::UNKNOWN ? textureDesc.format : viewDesc.format);
-    desc.dimension = GetTextureViewDimension(viewDesc.type, textureDesc);
-    desc.baseMipLevel = viewDesc.mipOffset;
-    desc.mipLevelCount = viewDesc.mipNum == REMAINING ? WGPU_MIP_LEVEL_COUNT_UNDEFINED : viewDesc.mipNum;
-    desc.baseArrayLayer = viewDesc.layerOffset;
-    desc.arrayLayerCount = viewDesc.layerNum == REMAINING ? WGPU_ARRAY_LAYER_COUNT_UNDEFINED : viewDesc.layerNum;
-    desc.aspect = WGPUTextureAspect_All;
-
-    return wgpuTextureCreateView(*texture, &desc);
-}
-
 WGPURenderPipeline CommandBufferWGPU::GetClearPipeline(uint32_t colorAttachmentIndex, PlaneBits planes, WGPUPipelineLayout& pipelineLayout) {
     for (ClearPipelineWGPU& clearPipeline : m_ClearPipelines) {
         bool isSame = clearPipeline.depthStencilFormat == m_RenderDepthStencilFormat
@@ -190,7 +472,7 @@ WGPURenderPipeline CommandBufferWGPU::GetClearPipeline(uint32_t colorAttachmentI
 
     Format immediateFormat = (planes & PlaneBits::COLOR) && colorAttachmentIndex < m_RenderColorNum ? m_RenderColorFormats[colorAttachmentIndex] : Format::RGBA32_SFLOAT;
     std::string clearShaderSource = "struct ClearConstants { color: vec4<";
-    clearShaderSource += GetFormatScalarTypeWGPU(immediateFormat);
+    clearShaderSource += GetFormatScalarType(immediateFormat);
     clearShaderSource += ">, }\n";
     clearShaderSource +=
         "var<immediate> c: ClearConstants;\n"
@@ -206,7 +488,7 @@ WGPURenderPipeline CommandBufferWGPU::GetClearPipeline(uint32_t colorAttachmentI
             char location[128] = {};
             snprintf(location, sizeof(location), "    @location(%u) color%u: ", i, i);
             clearShaderSource += location;
-            clearShaderSource += GetFormatShaderTypeWGPU(m_RenderColorFormats[i]);
+            clearShaderSource += GetFormatShaderType(m_RenderColorFormats[i]);
             clearShaderSource += ",\n";
         }
 
@@ -220,9 +502,9 @@ WGPURenderPipeline CommandBufferWGPU::GetClearPipeline(uint32_t colorAttachmentI
             snprintf(output, sizeof(output), "    output.color%u = ", i);
             clearShaderSource += output;
             if ((planes & PlaneBits::COLOR) && i == colorAttachmentIndex)
-                clearShaderSource += GetClearShaderValueWGPU(m_RenderColorFormats[i]);
+                clearShaderSource += GetClearShaderValue(m_RenderColorFormats[i]);
             else
-                clearShaderSource += GetZeroShaderValueWGPU(m_RenderColorFormats[i]);
+                clearShaderSource += GetZeroShaderValue(m_RenderColorFormats[i]);
             clearShaderSource += ";\n";
         }
 
@@ -345,20 +627,6 @@ struct ClearStorageTextureConstantsWGPU {
     uint32_t pad;
 };
 
-static WGPUShaderModule CreateShaderModuleWGPU(DeviceWGPU& device, const std::string& source) {
-    WGPUShaderSourceWGSL wgsl = WGPU_SHADER_SOURCE_WGSL_INIT;
-    wgsl.code = {source.data(), source.size()};
-
-    WGPUShaderModuleDescriptor desc = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
-    desc.nextInChain = &wgsl.chain;
-
-    return wgpuDeviceCreateShaderModule(device, &desc);
-}
-
-static uint32_t DivideUpWGPU(uint32_t x, uint32_t y) {
-    return (x + y - 1) / y;
-}
-
 WGPUComputePipeline CommandBufferWGPU::GetClearStorageBufferPipeline(WGPUBindGroupLayout& bindGroupLayout) {
     bindGroupLayout = m_ClearStorageBufferPipeline.bindGroupLayout;
     if (m_ClearStorageBufferPipeline.pipeline)
@@ -392,7 +660,7 @@ WGPUComputePipeline CommandBufferWGPU::GetClearStorageBufferPipeline(WGPUBindGro
         "    dst[i] = value;\n"
         "}\n";
 
-    WGPUShaderModule shader = CreateShaderModuleWGPU(m_Device, shaderSource);
+    WGPUShaderModule shader = CreateShaderModule(m_Device, shaderSource);
     if (!shader)
         return nullptr;
 
@@ -445,90 +713,6 @@ WGPUComputePipeline CommandBufferWGPU::GetClearStorageBufferPipeline(WGPUBindGro
     return pipeline;
 }
 
-static const char* GetStorageTextureFormatNameWGPU(Format format) {
-    switch (format) {
-        case Format::BGRA8_UNORM: return "bgra8unorm";
-        case Format::RGBA8_UNORM: return "rgba8unorm";
-        case Format::RGBA8_SNORM: return "rgba8snorm";
-        case Format::RGBA8_UINT: return "rgba8uint";
-        case Format::RGBA8_SINT: return "rgba8sint";
-        case Format::RGBA16_UINT: return "rgba16uint";
-        case Format::RGBA16_SINT: return "rgba16sint";
-        case Format::RGBA16_SFLOAT: return "rgba16float";
-        case Format::R32_UINT: return "r32uint";
-        case Format::R32_SINT: return "r32sint";
-        case Format::R32_SFLOAT: return "r32float";
-        case Format::RG32_UINT: return "rg32uint";
-        case Format::RG32_SINT: return "rg32sint";
-        case Format::RG32_SFLOAT: return "rg32float";
-        case Format::RGBA32_UINT: return "rgba32uint";
-        case Format::RGBA32_SINT: return "rgba32sint";
-        case Format::RGBA32_SFLOAT: return "rgba32float";
-        default: return nullptr;
-    }
-}
-
-static const char* GetStorageTextureDimensionNameWGPU(WGPUTextureViewDimension dimension) {
-    switch (dimension) {
-        case WGPUTextureViewDimension_1D: return "1d";
-        case WGPUTextureViewDimension_2D: return "2d";
-        case WGPUTextureViewDimension_2DArray: return "2d_array";
-        case WGPUTextureViewDimension_3D: return "3d";
-        default: return nullptr;
-    }
-}
-
-static const char* GetStorageTextureValueWGPU(Format format) {
-    const FormatProps& props = GetFormatProps(format);
-    if (props.isInteger)
-        return props.isSigned ? "c.i" : "c.u";
-
-    return "c.f";
-}
-
-static void AppendStorageTextureStoreWGPU(std::string& shaderSource, WGPUTextureViewDimension dimension, const char* value) {
-    switch (dimension) {
-        case WGPUTextureViewDimension_1D:
-            shaderSource +=
-                "    if (id.x >= c.width) {\n"
-                "        return;\n"
-                "    }\n"
-                "    textureStore(dst, i32(id.x), ";
-            shaderSource += value;
-            shaderSource += ");\n";
-            break;
-        case WGPUTextureViewDimension_2D:
-            shaderSource +=
-                "    if (id.x >= c.width || id.y >= c.height) {\n"
-                "        return;\n"
-                "    }\n"
-                "    textureStore(dst, vec2<i32>(id.xy), ";
-            shaderSource += value;
-            shaderSource += ");\n";
-            break;
-        case WGPUTextureViewDimension_2DArray:
-            shaderSource +=
-                "    if (id.x >= c.width || id.y >= c.height || id.z >= c.depth) {\n"
-                "        return;\n"
-                "    }\n"
-                "    textureStore(dst, vec2<i32>(id.xy), i32(id.z), ";
-            shaderSource += value;
-            shaderSource += ");\n";
-            break;
-        case WGPUTextureViewDimension_3D:
-            shaderSource +=
-                "    if (id.x >= c.width || id.y >= c.height || id.z >= c.depth) {\n"
-                "        return;\n"
-                "    }\n"
-                "    textureStore(dst, vec3<i32>(id.xyz), ";
-            shaderSource += value;
-            shaderSource += ");\n";
-            break;
-        default:
-            break;
-    }
-}
-
 WGPUComputePipeline CommandBufferWGPU::GetClearStorageTexturePipeline(Format format, WGPUTextureViewDimension dimension, WGPUBindGroupLayout& bindGroupLayout) {
     for (ClearStorageTexturePipelineWGPU& clearPipeline : m_ClearStorageTexturePipelines) {
         if (clearPipeline.format == format && clearPipeline.dimension == dimension) {
@@ -537,8 +721,8 @@ WGPUComputePipeline CommandBufferWGPU::GetClearStorageTexturePipeline(Format for
         }
     }
 
-    const char* formatName = GetStorageTextureFormatNameWGPU(format);
-    const char* dimensionName = GetStorageTextureDimensionNameWGPU(dimension);
+    const char* formatName = GetStorageTextureFormatName(format);
+    const char* dimensionName = GetStorageTextureDimensionName(dimension);
     if (!formatName || !dimensionName)
         return nullptr;
 
@@ -561,10 +745,10 @@ WGPUComputePipeline CommandBufferWGPU::GetClearStorageTexturePipeline(Format for
         ", write>;\n"
         "@compute @workgroup_size(8, 8, 1)\n"
         "fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n";
-    AppendStorageTextureStoreWGPU(shaderSource, dimension, GetStorageTextureValueWGPU(format));
+    AppendStorageTextureStore(shaderSource, dimension, GetStorageTextureValue(format));
     shaderSource += "}\n";
 
-    WGPUShaderModule shader = CreateShaderModuleWGPU(m_Device, shaderSource);
+    WGPUShaderModule shader = CreateShaderModule(m_Device, shaderSource);
     if (!shader)
         return nullptr;
 
@@ -1188,9 +1372,11 @@ void CommandBufferWGPU::BeginRendering(const RenderingDesc& renderingDesc) {
         const TextureDesc* textureDesc = descriptor.GetTextureDesc();
         m_RenderDepthStencilFormat = descriptor.GetFormat();
 
-        if (renderingDesc.depth.descriptor && renderingDesc.stencil.descriptor) {
-            // TODO: WGPU needs a single depth-stencil view for the render pass. NRI can provide separate plane descriptors.
-            m_RenderDepthStencilView = CreateDepthStencilViewWGPU(descriptor);
+        bool hasSeparateDepthStencilDescriptors = renderingDesc.depth.descriptor && renderingDesc.stencil.descriptor;
+        bool hasReadOnlyDepthStencilPlane = formatProps.isDepth && formatProps.isStencil && descriptor.GetTextureViewDesc().planes != PlaneBits::ALL;
+        if (hasSeparateDepthStencilDescriptors || hasReadOnlyDepthStencilPlane) {
+            // WGPU expresses read-only planes in the render pass, which requires an all-aspect view for a combined format.
+            m_RenderDepthStencilView = CreateDepthStencilView(descriptor);
             depthStencilAttachment.view = m_RenderDepthStencilView;
         } else
             depthStencilAttachment.view = descriptor.GetTextureView();
@@ -1205,16 +1391,24 @@ void CommandBufferWGPU::BeginRendering(const RenderingDesc& renderingDesc) {
 
         if (formatProps.isDepth) {
             const AttachmentDesc& depth = renderingDesc.depth.descriptor ? renderingDesc.depth : *depthOrStencil;
-            depthStencilAttachment.depthLoadOp = GetLoadOp(depth.loadOp);
-            depthStencilAttachment.depthStoreOp = GetStoreOp(depth.storeOp);
-            depthStencilAttachment.depthClearValue = depth.clearValue.depthStencil.depth;
+            bool isReadOnly = IsDepthStencilPlaneReadOnly(*(DescriptorWGPU*)depth.descriptor, PlaneBits::DEPTH);
+            depthStencilAttachment.depthReadOnly = isReadOnly ? WGPU_TRUE : WGPU_FALSE;
+            if (!isReadOnly) {
+                depthStencilAttachment.depthLoadOp = GetLoadOp(depth.loadOp);
+                depthStencilAttachment.depthStoreOp = GetStoreOp(depth.storeOp);
+                depthStencilAttachment.depthClearValue = depth.clearValue.depthStencil.depth;
+            }
         }
 
         if (formatProps.isStencil) {
             const AttachmentDesc& stencil = renderingDesc.stencil.descriptor ? renderingDesc.stencil : *depthOrStencil;
-            depthStencilAttachment.stencilLoadOp = GetLoadOp(stencil.loadOp);
-            depthStencilAttachment.stencilStoreOp = GetStoreOp(stencil.storeOp);
-            depthStencilAttachment.stencilClearValue = stencil.clearValue.depthStencil.stencil;
+            bool isReadOnly = IsDepthStencilPlaneReadOnly(*(DescriptorWGPU*)stencil.descriptor, PlaneBits::STENCIL);
+            depthStencilAttachment.stencilReadOnly = isReadOnly ? WGPU_TRUE : WGPU_FALSE;
+            if (!isReadOnly) {
+                depthStencilAttachment.stencilLoadOp = GetLoadOp(stencil.loadOp);
+                depthStencilAttachment.stencilStoreOp = GetStoreOp(stencil.storeOp);
+                depthStencilAttachment.stencilClearValue = stencil.clearValue.depthStencil.stencil;
+            }
         }
 
         depthStencilAttachmentPtr = &depthStencilAttachment;
@@ -1270,7 +1464,7 @@ void CommandBufferWGPU::ClearAttachments(const ClearAttachmentDesc* clearAttachm
         const ClearAttachmentDesc& clearAttachmentDesc = clearAttachmentDescs[i];
 
         uint32_t colorAttachmentIndex = clearAttachmentDesc.colorAttachmentIndex;
-        if (colorAttachmentIndex < m_RenderColorNum && (NormalizeClearPlanesWGPU(clearAttachmentDesc.planes, m_RenderColorFormats[colorAttachmentIndex]) & PlaneBits::COLOR) && m_RenderColorFormats[colorAttachmentIndex] != Format::UNKNOWN) {
+        if (colorAttachmentIndex < m_RenderColorNum && (NormalizeClearPlanes(clearAttachmentDesc.planes, m_RenderColorFormats[colorAttachmentIndex]) & PlaneBits::COLOR) && m_RenderColorFormats[colorAttachmentIndex] != Format::UNKNOWN) {
             WGPUPipelineLayout clearPipelineLayout = nullptr;
             WGPURenderPipeline clearPipeline = GetClearPipeline(colorAttachmentIndex, PlaneBits::COLOR, clearPipelineLayout);
             MaybeUnused(clearPipelineLayout);
@@ -1284,7 +1478,7 @@ void CommandBufferWGPU::ClearAttachments(const ClearAttachmentDesc* clearAttachm
             }
         }
 
-        PlaneBits depthStencilPlanes = (PlaneBits)(NormalizeClearPlanesWGPU(clearAttachmentDesc.planes, m_RenderDepthStencilFormat) & (PlaneBits::DEPTH | PlaneBits::STENCIL));
+        PlaneBits depthStencilPlanes = (PlaneBits)(NormalizeClearPlanes(clearAttachmentDesc.planes, m_RenderDepthStencilFormat) & (PlaneBits::DEPTH | PlaneBits::STENCIL));
         if (depthStencilPlanes != PlaneBits::NONE && depthStencilPlanes != PlaneBits::ALL && m_RenderDepthStencilFormat != Format::UNKNOWN) {
             WGPUPipelineLayout clearPipelineLayout = nullptr;
             WGPURenderPipeline clearPipeline = GetClearPipeline(0, depthStencilPlanes, clearPipelineLayout);
@@ -1329,38 +1523,6 @@ void CommandBufferWGPU::ClearAttachments(const ClearAttachmentDesc* clearAttachm
     MarkDescriptorSetsDirty(BindPoint::GRAPHICS);
     BindRootGroup(BindPoint::GRAPHICS);
     BindDescriptorSets(BindPoint::GRAPHICS);
-}
-
-static TextureRegionDesc GetWholeTextureRegion(const TextureDesc& textureDesc) {
-    TextureRegionDesc region = {};
-    region.width = WHOLE_SIZE;
-    region.height = WHOLE_SIZE;
-    region.depth = textureDesc.type == TextureType::TEXTURE_3D ? WHOLE_SIZE : textureDesc.layerNum;
-    region.planes = PlaneBits::ALL;
-
-    return region;
-}
-
-static void FillTexelCopyTexture(WGPUTexelCopyTextureInfo& out, const TextureWGPU& texture, const TextureRegionDesc& region) {
-    out = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
-    out.texture = texture;
-    out.mipLevel = region.mipOffset;
-    out.origin.x = region.x;
-    out.origin.y = region.y;
-    out.origin.z = (uint32_t)region.z + region.layerOffset;
-    out.aspect = GetTextureAspect(region.planes);
-}
-
-static WGPUExtent3D GetCopySize(const TextureDesc& textureDesc, const TextureRegionDesc& region) {
-    WGPUExtent3D size = {};
-    size.width = region.width == WHOLE_SIZE ? GetDimension(GraphicsAPI::WGPU, textureDesc, 0, region.mipOffset) : region.width;
-    size.height = region.height == WHOLE_SIZE ? GetDimension(GraphicsAPI::WGPU, textureDesc, 1, region.mipOffset) : region.height;
-    if (textureDesc.type == TextureType::TEXTURE_3D)
-        size.depthOrArrayLayers = region.depth == WHOLE_SIZE ? (uint32_t)GetDimension(GraphicsAPI::WGPU, textureDesc, 2, region.mipOffset) : (uint32_t)GetCountOrOne(region.depth);
-    else
-        size.depthOrArrayLayers = region.depth == WHOLE_SIZE ? textureDesc.layerNum - region.layerOffset : (uint32_t)GetCountOrOne(region.depth);
-
-    return size;
 }
 
 void CommandBufferWGPU::Draw(const DrawDesc& drawDesc) {
@@ -1468,13 +1630,22 @@ void CommandBufferWGPU::CopyTexture(Texture& dstTexture, const TextureRegionDesc
     const TextureRegionDesc& dst = dstRegion ? *dstRegion : dstWholeRegion;
     const TextureRegionDesc& src = srcRegion ? *srcRegion : srcWholeRegion;
 
-    WGPUTexelCopyTextureInfo srcInfo = {};
-    WGPUTexelCopyTextureInfo dstInfo = {};
-    FillTexelCopyTexture(srcInfo, srcTextureWGPU, src);
-    FillTexelCopyTexture(dstInfo, dstTextureWGPU, dst);
+    bool isWholeResource = !dstRegion && !srcRegion;
+    Dim_t mipNum = isWholeResource ? dstTextureDesc.mipNum : 1;
+    for (Dim_t mip = 0; mip < mipNum; mip++) {
+        if (isWholeResource) {
+            srcWholeRegion.mipOffset = mip;
+            dstWholeRegion.mipOffset = mip;
+        }
 
-    WGPUExtent3D size = GetCopySize(srcTextureDesc, src);
-    wgpuCommandEncoderCopyTextureToTexture(m_CommandEncoder, &srcInfo, &dstInfo, &size);
+        WGPUTexelCopyTextureInfo srcInfo = {};
+        WGPUTexelCopyTextureInfo dstInfo = {};
+        FillTexelCopyTexture(srcInfo, srcTextureWGPU, src);
+        FillTexelCopyTexture(dstInfo, dstTextureWGPU, dst);
+
+        WGPUExtent3D size = GetCopySize(srcTextureDesc, src);
+        wgpuCommandEncoderCopyTextureToTexture(m_CommandEncoder, &srcInfo, &dstInfo, &size);
+    }
 }
 
 void CommandBufferWGPU::UploadBufferToTexture(Texture& dstTexture, const TextureRegionDesc& dstRegion, const Buffer& srcBuffer, const TextureDataLayoutDesc& srcDataLayout) {
@@ -1525,153 +1696,6 @@ void CommandBufferWGPU::ZeroBuffer(Buffer& buffer, uint64_t offset, uint64_t siz
     clearSize &= ~3ull;
     if (clearSize)
         wgpuCommandEncoderClearBuffer(m_CommandEncoder, bufferWGPU, offset, clearSize);
-}
-
-static uint32_t GetClearChannelBits(const FormatProps& props, uint32_t channelIndex) {
-    switch (channelIndex) {
-        case 0:
-            return props.redBits;
-        case 1:
-            return props.greenBits;
-        case 2:
-            return props.blueBits;
-        case 3:
-            return props.alphaBits;
-        default:
-            return 0;
-    }
-}
-
-static uint32_t FloatToUnorm(float value, uint32_t bits) {
-    value = std::min(std::max(value, 0.0f), 1.0f);
-    uint32_t maxValue = bits == 32 ? 0xFFFFFFFFu : ((1u << bits) - 1u);
-    return (uint32_t)(value * (float)maxValue + 0.5f);
-}
-
-static int32_t FloatToSnorm(float value, uint32_t bits) {
-    value = std::min(std::max(value, -1.0f), 1.0f);
-    int32_t maxValue = (1 << (bits - 1)) - 1;
-    int32_t minValue = -maxValue;
-    return std::min(std::max((int32_t)(value * (float)maxValue + (value >= 0.0f ? 0.5f : -0.5f)), minValue), maxValue);
-}
-
-static uint16_t FloatToFloat16(float value) {
-    uint32_t f = 0;
-    memcpy(&f, &value, sizeof(f));
-
-    uint32_t sign = (f >> 16) & 0x8000;
-    uint32_t mantissa = f & 0x007FFFFF;
-    int32_t exponent = (int32_t)((f >> 23) & 0xFF) - 127 + 15;
-
-    if (exponent <= 0) {
-        if (exponent < -10)
-            return (uint16_t)sign;
-
-        mantissa = (mantissa | 0x00800000) >> (1 - exponent);
-        return (uint16_t)(sign | ((mantissa + 0x00001000) >> 13));
-    }
-
-    if (exponent >= 31) {
-        if (mantissa)
-            return (uint16_t)(sign | 0x7E00);
-
-        return (uint16_t)(sign | 0x7C00);
-    }
-
-    return (uint16_t)(sign | ((uint32_t)exponent << 10) | ((mantissa + 0x00001000) >> 13));
-}
-
-static void StoreClearChannel(uint8_t*& dst, const Color& value, const FormatProps& props, uint32_t channelIndex) {
-    uint32_t bits = GetClearChannelBits(props, channelIndex);
-    if (!bits)
-        return;
-
-    uint32_t byteNum = bits / 8;
-    uint32_t bitsValue = 0;
-
-    if (props.isFloat) {
-        if (bits == 32)
-            memcpy(&bitsValue, &((&value.f.x)[channelIndex]), sizeof(float));
-        else if (bits == 16)
-            bitsValue = FloatToFloat16((&value.f.x)[channelIndex]);
-    } else if (props.isNorm) {
-        if (props.isSigned)
-            bitsValue = (uint32_t)FloatToSnorm((&value.f.x)[channelIndex], bits);
-        else
-            bitsValue = FloatToUnorm((&value.f.x)[channelIndex], bits);
-    } else if (props.isInteger) {
-        bitsValue = props.isSigned ? (uint32_t)(&value.i.x)[channelIndex] : (&value.ui.x)[channelIndex];
-    } else
-        memcpy(&bitsValue, &((&value.f.x)[channelIndex]), std::min<uint32_t>(byteNum, sizeof(bitsValue)));
-
-    memcpy(dst, &bitsValue, byteNum);
-    dst += byteNum;
-}
-
-static void FillClearPattern(uint8_t* dst, Format format, const Color& value) {
-    const FormatProps& props = GetFormatProps(format);
-    memset(dst, 0, props.stride);
-
-    if (props.isPacked || props.isCompressed)
-        return;
-
-    uint8_t* at = dst;
-    StoreClearChannel(at, value, props, 0);
-    StoreClearChannel(at, value, props, 1);
-    StoreClearChannel(at, value, props, 2);
-    StoreClearChannel(at, value, props, 3);
-}
-
-static uint32_t GetPatternWordPeriod(uint32_t stride) {
-    uint32_t a = stride;
-    uint32_t b = 4;
-    while (b) {
-        uint32_t t = a % b;
-        a = b;
-        b = t;
-    }
-
-    uint32_t gcd = a;
-    return std::max(stride / gcd, 1u);
-}
-
-static bool FillClearPatternWords(std::array<uint32_t, 4>& words, uint32_t& period, Format format, const Color& value) {
-    const FormatProps& props = GetFormatProps(format);
-    if (!props.stride || props.isPacked || props.isCompressed)
-        return false;
-
-    period = GetPatternWordPeriod(props.stride);
-    if (period > 4)
-        return false;
-
-    std::array<uint8_t, 16> pattern = {};
-    FillClearPattern(pattern.data(), format, value);
-
-    for (uint32_t i = 0; i < period; i++) {
-        std::array<uint8_t, 4> word = {};
-        for (uint32_t j = 0; j < 4; j++)
-            word[j] = pattern[(i * 4 + j) % props.stride];
-
-        memcpy(&words[i], word.data(), word.size());
-    }
-
-    return true;
-}
-
-static bool IsClearValueZero(const Color& value) {
-    return value.ui.x == 0 && value.ui.y == 0 && value.ui.z == 0 && value.ui.w == 0;
-}
-
-WGPUBuffer CreateTemporaryUploadBuffer(DeviceWGPU& device, uint64_t size, const void* data) {
-    WGPUBufferDescriptor desc = WGPU_BUFFER_DESCRIPTOR_INIT;
-    desc.size = Align(std::max<uint64_t>(size, 4), 4);
-    desc.usage = WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst;
-
-    WGPUBuffer buffer = wgpuDeviceCreateBuffer(device, &desc);
-    if (buffer && data)
-        wgpuQueueWriteBuffer(device.GetQueue(), buffer, 0, data, (size_t)size);
-
-    return buffer;
 }
 
 void CommandBufferWGPU::ResolveTexture(Texture& dstTexture, const TextureRegionDesc* dstRegion, const Texture& srcTexture, const TextureRegionDesc* srcRegion, ResolveOp resolveOp) {
@@ -1783,7 +1807,7 @@ void CommandBufferWGPU::ClearStorage(const ClearStorageDesc& clearStorageDesc) {
             wgpuComputePassEncoderSetPipeline(pass, pipeline);
             wgpuComputePassEncoderSetBindGroup(pass, 0, bindGroup, 0, nullptr);
             wgpuComputePassEncoderSetImmediates(pass, 0, &constants, sizeof(constants));
-            wgpuComputePassEncoderDispatchWorkgroups(pass, DivideUpWGPU(constants.wordNum, 64u), 1, 1);
+            wgpuComputePassEncoderDispatchWorkgroups(pass, DivideUp(constants.wordNum, 64u), 1, 1);
             wgpuComputePassEncoderEnd(pass);
             wgpuComputePassEncoderRelease(pass);
         }
@@ -1844,7 +1868,7 @@ void CommandBufferWGPU::ClearStorage(const ClearStorageDesc& clearStorageDesc) {
         wgpuComputePassEncoderSetPipeline(pass, pipeline);
         wgpuComputePassEncoderSetBindGroup(pass, 0, bindGroup, 0, nullptr);
         wgpuComputePassEncoderSetImmediates(pass, 0, &constants, sizeof(constants));
-        wgpuComputePassEncoderDispatchWorkgroups(pass, DivideUpWGPU(width, 8u), DivideUpWGPU(constants.height, 8u), depth);
+        wgpuComputePassEncoderDispatchWorkgroups(pass, DivideUp(width, 8u), DivideUp(constants.height, 8u), depth);
         wgpuComputePassEncoderEnd(pass);
         wgpuComputePassEncoderRelease(pass);
     }

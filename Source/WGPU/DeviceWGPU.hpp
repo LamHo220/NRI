@@ -1,22 +1,29 @@
 // © 2026 NVIDIA Corporation
 
-struct RequestAdapterContext {
-    WGPUAdapter adapter = nullptr;
-    WGPURequestAdapterStatus status = WGPURequestAdapterStatus_Error;
-    bool done = false;
-};
-
 struct RequestDeviceContext {
     WGPUDevice device = nullptr;
     WGPURequestDeviceStatus status = WGPURequestDeviceStatus_Error;
     bool done = false;
 };
 
-static void OnAdapterRequested(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView, void* userdata1, void*) {
-    RequestAdapterContext& context = *(RequestAdapterContext*)userdata1;
-    context.status = status;
-    context.adapter = adapter;
-    context.done = true;
+static inline bool IsSameAdapter(const AdapterDesc& adapterDesc, const WGPUAdapterInfo& adapterInfo) {
+
+    if (adapterDesc.vendor != Vendor::UNKNOWN && adapterDesc.deviceId && adapterInfo.vendorID && adapterInfo.deviceID)
+        return adapterDesc.vendor == GetVendorFromID(adapterInfo.vendorID) && adapterDesc.deviceId == adapterInfo.deviceID;
+
+    size_t nameLength = strlen(adapterDesc.name);
+
+    return adapterInfo.device.data && adapterInfo.device.length == nameLength && memcmp(adapterInfo.device.data, adapterDesc.name, nameLength) == 0;
+}
+
+static inline bool IsAdapterSupported(WGPUAdapter adapter) {
+
+    if (wgpuAdapterHasFeature(adapter, (WGPUFeatureName)WGPUNativeFeature_Immediates) != WGPU_TRUE)
+        return false;
+
+    WGPULimits limits = WGPU_LIMITS_INIT;
+
+    return wgpuAdapterGetLimits(adapter, &limits) == WGPUStatus_Success && limits.maxImmediateSize >= 256;
 }
 
 static void OnDeviceRequested(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView, void* userdata1, void*) {
@@ -34,9 +41,101 @@ static void WaitForAsyncRequest(WGPUInstance instance, const bool& done) {
     }
 }
 
+static bool IsBCFormat(Format format) {
+    switch (format) {
+        case Format::BC1_RGBA_UNORM:
+        case Format::BC1_RGBA_SRGB:
+        case Format::BC2_RGBA_UNORM:
+        case Format::BC2_RGBA_SRGB:
+        case Format::BC3_RGBA_UNORM:
+        case Format::BC3_RGBA_SRGB:
+        case Format::BC4_R_UNORM:
+        case Format::BC4_R_SNORM:
+        case Format::BC5_RG_UNORM:
+        case Format::BC5_RG_SNORM:
+        case Format::BC6H_RGB_UFLOAT:
+        case Format::BC6H_RGB_SFLOAT:
+        case Format::BC7_RGBA_UNORM:
+        case Format::BC7_RGBA_SRGB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool IsETC2Format(Format format) {
+    switch (format) {
+        case Format::ETC2_RGB8_UNORM:
+        case Format::ETC2_RGB8_SRGB:
+        case Format::ETC2_RGB8_A1_UNORM:
+        case Format::ETC2_RGB8_A1_SRGB:
+        case Format::ETC2_RGB8_A8_UNORM:
+        case Format::ETC2_RGB8_A8_SRGB:
+        case Format::ETC2_R11_UNORM:
+        case Format::ETC2_R11_SNORM:
+        case Format::ETC2_R11_G11_UNORM:
+        case Format::ETC2_R11_G11_SNORM:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool IsASTCFormat(Format format) {
+    switch (format) {
+        case Format::ASTC_4X4_UNORM:
+        case Format::ASTC_4X4_SRGB:
+        case Format::ASTC_5X4_UNORM:
+        case Format::ASTC_5X4_SRGB:
+        case Format::ASTC_5X5_UNORM:
+        case Format::ASTC_5X5_SRGB:
+        case Format::ASTC_6X5_UNORM:
+        case Format::ASTC_6X5_SRGB:
+        case Format::ASTC_6X6_UNORM:
+        case Format::ASTC_6X6_SRGB:
+        case Format::ASTC_8X5_UNORM:
+        case Format::ASTC_8X5_SRGB:
+        case Format::ASTC_8X6_UNORM:
+        case Format::ASTC_8X6_SRGB:
+        case Format::ASTC_8X8_UNORM:
+        case Format::ASTC_8X8_SRGB:
+        case Format::ASTC_10X5_UNORM:
+        case Format::ASTC_10X5_SRGB:
+        case Format::ASTC_10X6_UNORM:
+        case Format::ASTC_10X6_SRGB:
+        case Format::ASTC_10X8_UNORM:
+        case Format::ASTC_10X8_SRGB:
+        case Format::ASTC_10X10_UNORM:
+        case Format::ASTC_10X10_SRGB:
+        case Format::ASTC_12X10_UNORM:
+        case Format::ASTC_12X10_SRGB:
+        case Format::ASTC_12X12_UNORM:
+        case Format::ASTC_12X12_SRGB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool Is16BitNormFormat(Format format) {
+    switch (format) {
+        case Format::R16_UNORM:
+        case Format::R16_SNORM:
+        case Format::RG16_UNORM:
+        case Format::RG16_SNORM:
+        case Format::RGBA16_UNORM:
+        case Format::RGBA16_SNORM:
+            return true;
+        default:
+            return false;
+    }
+}
+
 DeviceWGPU::DeviceWGPU(const CallbackInterface& callbacks, const AllocationCallbacks& allocationCallbacks)
     : DeviceBase(callbacks, allocationCallbacks)
     , m_QueueFamilies{
+          Vector<QueueWGPU*>(GetStdAllocator()),
+          Vector<QueueWGPU*>(GetStdAllocator()),
           Vector<QueueWGPU*>(GetStdAllocator()),
           Vector<QueueWGPU*>(GetStdAllocator()),
           Vector<QueueWGPU*>(GetStdAllocator()),
@@ -118,22 +217,32 @@ Result DeviceWGPU::CreateInstanceAndDevice(const DeviceCreationDesc& desc) {
     if (!m_Instance)
         return Result::FAILURE;
 
-    WGPURequestAdapterOptions adapterOptions = WGPU_REQUEST_ADAPTER_OPTIONS_INIT;
-    adapterOptions.powerPreference = WGPUPowerPreference_HighPerformance;
+    WGPUInstanceEnumerateAdapterOptions adapterOptions = {};
+    adapterOptions.backends = WGPUInstanceBackend_Primary;
 
-    RequestAdapterContext adapterContext = {};
-    WGPURequestAdapterCallbackInfo adapterCallbackInfo = WGPU_REQUEST_ADAPTER_CALLBACK_INFO_INIT;
-    adapterCallbackInfo.mode = WGPUCallbackMode_AllowProcessEvents;
-    adapterCallbackInfo.callback = OnAdapterRequested;
-    adapterCallbackInfo.userdata1 = &adapterContext;
+    size_t adapterNum = wgpuInstanceEnumerateAdapters(m_Instance, &adapterOptions, nullptr);
+    Scratch<WGPUAdapter> adapters = NRI_ALLOCATE_SCRATCH(*this, WGPUAdapter, adapterNum);
+    adapterNum = wgpuInstanceEnumerateAdapters(m_Instance, &adapterOptions, adapters);
 
-    wgpuInstanceRequestAdapter(m_Instance, &adapterOptions, adapterCallbackInfo);
-    WaitForAsyncRequest(m_Instance, adapterContext.done);
+    for (size_t i = 0; i < adapterNum; i++) {
+        WGPUAdapterInfo adapterInfo = WGPU_ADAPTER_INFO_INIT;
+        bool isSameAdapter = wgpuAdapterGetInfo(adapters[i], &adapterInfo) == WGPUStatus_Success && IsSameAdapter(*desc.adapterDesc, adapterInfo);
+        wgpuAdapterInfoFreeMembers(adapterInfo);
 
-    if (adapterContext.status != WGPURequestAdapterStatus_Success || !adapterContext.adapter)
+        if (isSameAdapter && IsAdapterSupported(adapters[i])) {
+            m_Adapter = adapters[i];
+            adapters[i] = nullptr;
+            break;
+        }
+    }
+
+    for (size_t i = 0; i < adapterNum; i++) {
+        if (adapters[i])
+            wgpuAdapterRelease(adapters[i]);
+    }
+
+    if (!m_Adapter)
         return Result::FAILURE;
-
-    m_Adapter = adapterContext.adapter;
 
     std::array<WGPUFeatureName, 48> requiredFeatures = {};
     size_t requiredFeatureNum = 0;
@@ -355,6 +464,8 @@ void DeviceWGPU::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.features.shaderBytecodeSPIRV = true;
     m_Desc.features.shaderBytecodeWGSL = true;
     m_Desc.features.timestamp = m_IsTimestampQueryInsidePassesSupported;
+    m_Desc.features.rectColorClears = true;
+    m_Desc.features.rectDepthStencilClears = true;
     m_Desc.features.getMemoryDesc2 = true;
     m_Desc.features.componentSwizzle = wgpuDeviceHasFeature(m_Device, WGPUFeatureName_TextureComponentSwizzle) == WGPU_TRUE;
     m_Desc.features.rootConstantsOffset = true;
@@ -364,96 +475,6 @@ void DeviceWGPU::FillDesc(const AdapterDesc& adapterDesc) {
 
 void DeviceWGPU::Destruct() {
     Destroy(GetAllocationCallbacks(), this);
-}
-
-static bool IsBCFormat(Format format) {
-    switch (format) {
-        case Format::BC1_RGBA_UNORM:
-        case Format::BC1_RGBA_SRGB:
-        case Format::BC2_RGBA_UNORM:
-        case Format::BC2_RGBA_SRGB:
-        case Format::BC3_RGBA_UNORM:
-        case Format::BC3_RGBA_SRGB:
-        case Format::BC4_R_UNORM:
-        case Format::BC4_R_SNORM:
-        case Format::BC5_RG_UNORM:
-        case Format::BC5_RG_SNORM:
-        case Format::BC6H_RGB_UFLOAT:
-        case Format::BC6H_RGB_SFLOAT:
-        case Format::BC7_RGBA_UNORM:
-        case Format::BC7_RGBA_SRGB:
-            return true;
-        default:
-            return false;
-    }
-}
-
-static bool IsETC2Format(Format format) {
-    switch (format) {
-        case Format::ETC2_RGB8_UNORM:
-        case Format::ETC2_RGB8_SRGB:
-        case Format::ETC2_RGB8_A1_UNORM:
-        case Format::ETC2_RGB8_A1_SRGB:
-        case Format::ETC2_RGB8_A8_UNORM:
-        case Format::ETC2_RGB8_A8_SRGB:
-        case Format::ETC2_R11_UNORM:
-        case Format::ETC2_R11_SNORM:
-        case Format::ETC2_R11_G11_UNORM:
-        case Format::ETC2_R11_G11_SNORM:
-            return true;
-        default:
-            return false;
-    }
-}
-
-static bool IsASTCFormat(Format format) {
-    switch (format) {
-        case Format::ASTC_4X4_UNORM:
-        case Format::ASTC_4X4_SRGB:
-        case Format::ASTC_5X4_UNORM:
-        case Format::ASTC_5X4_SRGB:
-        case Format::ASTC_5X5_UNORM:
-        case Format::ASTC_5X5_SRGB:
-        case Format::ASTC_6X5_UNORM:
-        case Format::ASTC_6X5_SRGB:
-        case Format::ASTC_6X6_UNORM:
-        case Format::ASTC_6X6_SRGB:
-        case Format::ASTC_8X5_UNORM:
-        case Format::ASTC_8X5_SRGB:
-        case Format::ASTC_8X6_UNORM:
-        case Format::ASTC_8X6_SRGB:
-        case Format::ASTC_8X8_UNORM:
-        case Format::ASTC_8X8_SRGB:
-        case Format::ASTC_10X5_UNORM:
-        case Format::ASTC_10X5_SRGB:
-        case Format::ASTC_10X6_UNORM:
-        case Format::ASTC_10X6_SRGB:
-        case Format::ASTC_10X8_UNORM:
-        case Format::ASTC_10X8_SRGB:
-        case Format::ASTC_10X10_UNORM:
-        case Format::ASTC_10X10_SRGB:
-        case Format::ASTC_12X10_UNORM:
-        case Format::ASTC_12X10_SRGB:
-        case Format::ASTC_12X12_UNORM:
-        case Format::ASTC_12X12_SRGB:
-            return true;
-        default:
-            return false;
-    }
-}
-
-static bool Is16BitNormFormat(Format format) {
-    switch (format) {
-        case Format::R16_UNORM:
-        case Format::R16_SNORM:
-        case Format::RG16_UNORM:
-        case Format::RG16_SNORM:
-        case Format::RGBA16_UNORM:
-        case Format::RGBA16_SNORM:
-            return true;
-        default:
-            return false;
-    }
 }
 
 FormatSupportBits DeviceWGPU::GetFormatSupport(Format format) const {
@@ -497,10 +518,18 @@ Result DeviceWGPU::GetQueue(QueueType queueType, uint32_t queueIndex, Queue*& qu
 }
 
 Result DeviceWGPU::WaitIdle() {
+    ExclusiveScope lock(m_QueueLock);
+
     if (m_Device)
         wgpuDevicePoll(m_Device, WGPU_TRUE, nullptr);
 
     return Result::SUCCESS;
+}
+
+void DeviceWGPU::WriteBuffer(WGPUBuffer buffer, uint64_t offset, const void* data, size_t size) {
+    ExclusiveScope lock(m_QueueLock);
+
+    wgpuQueueWriteBuffer(m_Queue, buffer, offset, data, size);
 }
 
 HostCopyLayoutWGPU DeviceWGPU::GetHostCopyLayout(const TextureWGPU& texture, const TextureRegionDesc& region, uint64_t& offset, bool alignForBufferCopy) const {
@@ -529,6 +558,8 @@ HostCopyLayoutWGPU DeviceWGPU::GetHostCopyLayout(const TextureWGPU& texture, con
 Result DeviceWGPU::UploadHostMemoryToTexture(const UploadHostMemoryToTextureDesc* copyDescs, uint32_t copyDescNum) {
     if (!copyDescNum)
         return Result::SUCCESS;
+
+    ExclusiveScope lock(m_QueueLock);
 
     for (uint32_t i = 0; i < copyDescNum; i++) {
         const UploadHostMemoryToTextureDesc& copyDesc = copyDescs[i];
@@ -617,8 +648,10 @@ Result DeviceWGPU::ReadbackTextureToHostMemory(const ReadbackTextureToHostMemory
             result = Result::FAILURE;
     }
 
-    if (result == Result::SUCCESS)
+    if (result == Result::SUCCESS) {
+        ExclusiveScope lock(m_QueueLock);
         wgpuQueueSubmitForIndex(m_Queue, 1, &commandBuffer);
+    }
 
     if (commandBuffer)
         wgpuCommandBufferRelease(commandBuffer);

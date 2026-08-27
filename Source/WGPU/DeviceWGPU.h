@@ -93,10 +93,13 @@ struct DeviceWGPU final : public DeviceBase {
 
     Result GetQueue(QueueType queueType, uint32_t queueIndex, Queue*& queue);
     Result WaitIdle();
+    void WriteBuffer(WGPUBuffer buffer, uint64_t offset, const void* data, size_t size);
     Result UploadHostMemoryToTexture(const UploadHostMemoryToTextureDesc* copyDescs, uint32_t copyDescNum);
     Result ReadbackTextureToHostMemory(const ReadbackTextureToHostMemoryDesc* copyDescs, uint32_t copyDescNum);
 
 private:
+    friend struct QueueWGPU;
+
     HostCopyLayoutWGPU GetHostCopyLayout(const TextureWGPU& texture, const TextureRegionDesc& region, uint64_t& offset, bool alignForBufferCopy) const;
     Result AcquireHostCopyContext(HostCopyContextWGPU*& context);
     void ReleaseHostCopyContext(HostCopyContextWGPU& context);
@@ -116,6 +119,7 @@ private:
     VKBindingOffsets m_BindingOffsets = {};
     bool m_IsTimestampQueryInsidePassesSupported = false;
     bool m_IsSubgroupsSupported = false;
+    Lock m_QueueLock;
     Lock m_HostCopyContextLock;
 };
 

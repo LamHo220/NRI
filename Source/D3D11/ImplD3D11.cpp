@@ -214,19 +214,11 @@ static void NRI_CALL GetTextureMemoryDesc(const Texture& texture, MemoryLocation
 }
 
 static Result NRI_CALL BindBufferMemory(const BindBufferMemoryDesc* bindBufferMemoryDescs, uint32_t bindBufferMemoryDescNum) {
-    if (!bindBufferMemoryDescNum)
-        return Result::SUCCESS;
-
-    DeviceD3D11& deviceD3D11 = ((BufferD3D11*)bindBufferMemoryDescs->buffer)->GetDevice();
-    return deviceD3D11.BindBufferMemory(bindBufferMemoryDescs, bindBufferMemoryDescNum);
+    return BindBufferMemoryD3D11(bindBufferMemoryDescs, bindBufferMemoryDescNum);
 }
 
 static Result NRI_CALL BindTextureMemory(const BindTextureMemoryDesc* bindTextureMemoryDescs, uint32_t bindTextureMemoryDescNum) {
-    if (!bindTextureMemoryDescNum)
-        return Result::SUCCESS;
-
-    DeviceD3D11& deviceD3D11 = ((TextureD3D11*)bindTextureMemoryDescs->texture)->GetDevice();
-    return deviceD3D11.BindTextureMemory(bindTextureMemoryDescs, bindTextureMemoryDescNum);
+    return BindTextureMemoryD3D11(bindTextureMemoryDescs, bindTextureMemoryDescNum);
 }
 
 static void NRI_CALL GetBufferMemoryDesc2(const Device& device, const BufferDesc& bufferDesc, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) {

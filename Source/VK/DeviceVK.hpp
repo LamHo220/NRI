@@ -72,7 +72,10 @@ static inline VkBufferImageCopy GetLegacyBufferImageCopyRegion(const VkBufferIma
 static constexpr VkBufferUsageFlags GetBufferUsageFlags(const BufferDesc& bufferDesc, bool isDeviceAddressSupported) {
     VkBufferUsageFlags flags = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT; // TODO: ban "the opposite" for UPLOAD/READBACK?
 
-    if (isDeviceAddressSupported)
+    constexpr uint32_t videoUsageMask = (uint32_t)BufferUsageBits::VIDEO_DECODE | (uint32_t)BufferUsageBits::VIDEO_ENCODE;
+    const uint32_t usageMask = (uint32_t)bufferDesc.usage;
+    const bool isVideoOnly = (usageMask & videoUsageMask) != 0 && (usageMask & ~videoUsageMask) == 0;
+    if (isDeviceAddressSupported && !isVideoOnly)
         flags |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
     if (bufferDesc.usage & BufferUsageBits::VERTEX)
@@ -112,6 +115,12 @@ static constexpr VkBufferUsageFlags GetBufferUsageFlags(const BufferDesc& buffer
     if (bufferDesc.usage & BufferUsageBits::SHADER_RESOURCE_STORAGE)
         flags |= VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
 
+    if (bufferDesc.usage & BufferUsageBits::VIDEO_DECODE)
+        flags |= VK_BUFFER_USAGE_VIDEO_DECODE_SRC_BIT_KHR;
+
+    if (bufferDesc.usage & BufferUsageBits::VIDEO_ENCODE)
+        flags |= VK_BUFFER_USAGE_VIDEO_ENCODE_DST_BIT_KHR;
+
     return flags;
 }
 
@@ -135,6 +144,20 @@ static constexpr VkImageUsageFlags GetImageUsageFlags(TextureUsageBits textureUs
 
     if (textureUsageBits & TextureUsageBits::INPUT_ATTACHMENT)
         flags |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+
+    if (textureUsageBits & TextureUsageBits::VIDEO_DECODE) {
+        if (textureUsageBits & TextureUsageBits::VIDEO_REFERENCE_ONLY)
+            flags |= VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
+        else
+            flags |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
+    }
+
+    if (textureUsageBits & TextureUsageBits::VIDEO_ENCODE) {
+        if (textureUsageBits & TextureUsageBits::VIDEO_REFERENCE_ONLY)
+            flags |= VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR;
+        else
+            flags |= VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR;
+    }
 
     return flags;
 }
@@ -245,6 +268,156 @@ static VkBool32 VKAPI_PTR MessageCallback(VkDebugUtilsMessageSeverityFlagBitsEXT
 
     return VK_FALSE;
 }
+
+static uint32_t GetVideoCodecNum(VkVideoCodecOperationFlagsKHR videoCodecOperations, bool decode) {
+    const VkVideoCodecOperationFlagsKHR mask = decode ? VIDEO_DECODE_CODEC_OPERATION_MASK : VIDEO_ENCODE_CODEC_OPERATION_MASK;
+    videoCodecOperations &= mask;
+
+    uint32_t num = 0;
+    while (videoCodecOperations) {
+        num += videoCodecOperations & 1;
+        videoCodecOperations >>= 1;
+    }
+
+    return num;
+}
+
+static uint32_t BuildQueueCreateInfos(const QueueFamilyDesc* queueFamilies, uint32_t queueFamilyNum, const std::array<uint32_t, (size_t)QueueType::MAX_NUM>& familyIndices,
+    std::array<VkDeviceQueueCreateInfo, (size_t)QueueType::MAX_NUM>& queueCreateInfos, std::array<std::array<float, 256>, (size_t)QueueType::MAX_NUM>& queuePriorities) {
+    uint32_t queueCreateInfoNum = 0;
+
+    for (uint32_t i = 0; i < queueFamilyNum; i++) {
+        const QueueFamilyDesc& queueFamily = queueFamilies[i];
+        uint32_t queueFamilyIndex = familyIndices[(size_t)queueFamily.queueType];
+        if (!queueFamily.queueNum || queueFamilyIndex == INVALID_FAMILY_INDEX)
+            continue;
+
+        uint32_t queueCreateInfoIndex = queueCreateInfoNum;
+        for (uint32_t j = 0; j < queueCreateInfoNum; j++) {
+            if (queueCreateInfos[j].queueFamilyIndex == queueFamilyIndex && queueCreateInfos[j].flags == 0) {
+                queueCreateInfoIndex = j;
+                break;
+            }
+        }
+
+        if (queueCreateInfoIndex == queueCreateInfoNum) {
+            VkDeviceQueueCreateInfo& queueCreateInfo = queueCreateInfos[queueCreateInfoNum++];
+            queueCreateInfo = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+            queueCreateInfo.queueFamilyIndex = queueFamilyIndex;
+            queueCreateInfo.pQueuePriorities = queuePriorities[queueCreateInfoIndex].data();
+        }
+
+        VkDeviceQueueCreateInfo& queueCreateInfo = queueCreateInfos[queueCreateInfoIndex];
+        queueCreateInfo.queueCount = std::max(queueCreateInfo.queueCount, queueFamily.queueNum);
+        for (uint32_t j = 0; j < queueFamily.queueNum; j++) {
+            float priority = queueFamily.queuePriorities ? queueFamily.queuePriorities[j] : 0.0f;
+            queuePriorities[queueCreateInfoIndex][j] = std::max(queuePriorities[queueCreateInfoIndex][j], priority);
+        }
+    }
+
+    return queueCreateInfoNum;
+}
+
+static inline Lock* FindQueueLock(const std::array<Vector<QueueVK*>, (size_t)QueueType::MAX_NUM>& queueFamilies, VkQueue handle) {
+    for (const auto& queueFamily : queueFamilies) {
+        for (QueueVK* queue : queueFamily) {
+            if ((VkQueue)*queue == handle)
+                return &queue->GetLock();
+        }
+    }
+
+    return nullptr;
+}
+
+static void WriteSamplers(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc) {
+    VkDescriptorImageInfo* imageInfos = (VkDescriptorImageInfo*)(scratch + scratchOffset);
+    scratchOffset += rangeUpdateDesc.descriptorNum * sizeof(VkDescriptorImageInfo);
+
+    for (uint32_t i = 0; i < rangeUpdateDesc.descriptorNum; i++) {
+        const DescriptorVK& descriptorVK = *(DescriptorVK*)rangeUpdateDesc.descriptors[i];
+        imageInfos[i].imageView = VK_NULL_HANDLE;
+        imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageInfos[i].sampler = descriptorVK.GetSampler();
+    }
+
+    writeDescriptorSet.pImageInfo = imageInfos;
+}
+
+static void WriteTextures(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc) {
+    VkDescriptorImageInfo* imageInfos = (VkDescriptorImageInfo*)(scratch + scratchOffset);
+    scratchOffset += rangeUpdateDesc.descriptorNum * sizeof(VkDescriptorImageInfo);
+
+    for (uint32_t i = 0; i < rangeUpdateDesc.descriptorNum; i++) {
+        const DescriptorVK& descriptorVK = *(DescriptorVK*)rangeUpdateDesc.descriptors[i];
+
+        imageInfos[i].imageView = descriptorVK.GetImageView();
+        imageInfos[i].imageLayout = descriptorVK.GetTexViewDesc().expectedLayout;
+        imageInfos[i].sampler = VK_NULL_HANDLE;
+    }
+
+    writeDescriptorSet.pImageInfo = imageInfos;
+}
+
+static void WriteBuffers(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc) {
+    VkDescriptorBufferInfo* bufferInfos = (VkDescriptorBufferInfo*)(scratch + scratchOffset);
+    scratchOffset += rangeUpdateDesc.descriptorNum * sizeof(VkDescriptorBufferInfo);
+
+    for (uint32_t i = 0; i < rangeUpdateDesc.descriptorNum; i++) {
+        const DescriptorVK& descriptorVK = *(DescriptorVK*)rangeUpdateDesc.descriptors[i];
+        bufferInfos[i] = descriptorVK.GetBufferInfo();
+    }
+
+    writeDescriptorSet.pBufferInfo = bufferInfos;
+}
+
+static void WriteBufferViews(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc) {
+    VkBufferView* bufferViews = (VkBufferView*)(scratch + scratchOffset);
+    scratchOffset += rangeUpdateDesc.descriptorNum * sizeof(VkBufferView);
+
+    for (uint32_t i = 0; i < rangeUpdateDesc.descriptorNum; i++) {
+        const DescriptorVK& descriptorVK = *(DescriptorVK*)rangeUpdateDesc.descriptors[i];
+        bufferViews[i] = descriptorVK.GetBufferView();
+    }
+
+    writeDescriptorSet.pTexelBufferView = bufferViews;
+}
+
+static void WriteAccelerationStructures(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc) {
+    VkAccelerationStructureKHR* accelerationStructures = (VkAccelerationStructureKHR*)(scratch + scratchOffset);
+    scratchOffset += rangeUpdateDesc.descriptorNum * sizeof(VkAccelerationStructureKHR);
+
+    for (uint32_t i = 0; i < rangeUpdateDesc.descriptorNum; i++) {
+        const DescriptorVK& descriptorVK = *(DescriptorVK*)rangeUpdateDesc.descriptors[i];
+        accelerationStructures[i] = descriptorVK.GetAccelerationStructure();
+    }
+
+    VkWriteDescriptorSetAccelerationStructureKHR* accelerationStructureInfo = (VkWriteDescriptorSetAccelerationStructureKHR*)(scratch + scratchOffset);
+    scratchOffset += sizeof(VkWriteDescriptorSetAccelerationStructureKHR);
+
+    accelerationStructureInfo->sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    accelerationStructureInfo->pNext = nullptr;
+    accelerationStructureInfo->accelerationStructureCount = rangeUpdateDesc.descriptorNum;
+    accelerationStructureInfo->pAccelerationStructures = accelerationStructures;
+
+    writeDescriptorSet.pNext = accelerationStructureInfo;
+}
+
+typedef void (*WriteDescriptorsFunc)(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc);
+
+constexpr std::array<WriteDescriptorsFunc, (size_t)DescriptorType::MAX_NUM> g_WriteFuncs = {
+    WriteSamplers,               // SAMPLER
+    nullptr,                     // MUTABLE (never used)
+    WriteTextures,               // TEXTURE
+    WriteTextures,               // STORAGE_TEXTURE
+    WriteTextures,               // INPUT_ATTACHMENT
+    WriteBufferViews,            // BUFFER
+    WriteBufferViews,            // STORAGE_BUFFER
+    WriteBuffers,                // CONSTANT_BUFFER
+    WriteBuffers,                // STRUCTURED_BUFFER
+    WriteBuffers,                // STORAGE_STRUCTURED_BUFFER
+    WriteAccelerationStructures, // ACCELERATION_STRUCTURE
+};
+NRI_VALIDATE_ARRAY_BY_PTR(g_WriteFuncs);
 
 VkResult DeviceVK::CreateVma() {
     VmaVulkanFunctions vulkanFunctions = {};
@@ -405,6 +578,18 @@ void DeviceVK::ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, b
     APPEND_EXT(true, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     APPEND_EXT(true, VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME);
     APPEND_EXT(true, VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_ENCODE_H265_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_ENCODE_AV1_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME);
+    APPEND_EXT(true, VK_KHR_VIDEO_MAINTENANCE_2_EXTENSION_NAME);
     APPEND_EXT(true, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME); // TODO: use KHR (currently coverage is lower)
     APPEND_EXT(true, VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
     APPEND_EXT(true, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
@@ -429,6 +614,8 @@ void DeviceVK::ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, b
 DeviceVK::DeviceVK(const CallbackInterface& callbacks, const AllocationCallbacks& allocationCallbacks)
     : DeviceBase(callbacks, allocationCallbacks)
     , m_QueueFamilies{
+          Vector<QueueVK*>(GetStdAllocator()),
+          Vector<QueueVK*>(GetStdAllocator()),
           Vector<QueueVK*>(GetStdAllocator()),
           Vector<QueueVK*>(GetStdAllocator()),
           Vector<QueueVK*>(GetStdAllocator()),
@@ -507,6 +694,7 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
     }
 
     { // Create instance
+        // Temporary Vectors are acceptable during one-time device initialization
         Vector<const char*> desiredInstanceExts(GetStdAllocator());
         for (uint32_t i = 0; i < desc.vkExtensions.instanceExtensionNum; i++)
             desiredInstanceExts.push_back(desc.vkExtensions.instanceExtensions[i]);
@@ -580,6 +768,20 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         }
     }
 
+    // Queue family properties
+    uint32_t familyNum = 0;
+    m_VK.GetPhysicalDeviceQueueFamilyProperties2(m_PhysicalDevice, &familyNum, nullptr);
+
+    Scratch<VkQueueFamilyProperties2> familyProps2 = NRI_ALLOCATE_SCRATCH(*this, VkQueueFamilyProperties2, familyNum);
+    Scratch<VkQueueFamilyVideoPropertiesKHR> familyVideoProps = NRI_ALLOCATE_SCRATCH(*this, VkQueueFamilyVideoPropertiesKHR, familyNum);
+    for (uint32_t i = 0; i < familyNum; i++) {
+        familyProps2[i] = {VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2};
+        familyVideoProps[i] = {VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR};
+        familyProps2[i].pNext = &familyVideoProps[i];
+    }
+
+    m_VK.GetPhysicalDeviceQueueFamilyProperties2(m_PhysicalDevice, &familyNum, familyProps2);
+
     // Queue family indices
     std::array<uint32_t, (size_t)QueueType::MAX_NUM> queueFamilyIndices = {};
     queueFamilyIndices.fill(INVALID_FAMILY_INDEX);
@@ -587,35 +789,42 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         for (uint32_t i = 0; i < descVK.queueFamilyNum; i++) {
             const QueueFamilyVKDesc& queueFamilyVKDesc = descVK.queueFamilies[i];
             queueFamilyIndices[(size_t)queueFamilyVKDesc.queueType] = queueFamilyVKDesc.familyIndex;
+
+            if (queueFamilyVKDesc.queueType == QueueType::VIDEO_DECODE && queueFamilyVKDesc.queueNum)
+                m_VideoCodecOperations[(size_t)QueueType::VIDEO_DECODE] = familyVideoProps[queueFamilyVKDesc.familyIndex].videoCodecOperations & VIDEO_DECODE_CODEC_OPERATION_MASK;
+            else if (queueFamilyVKDesc.queueType == QueueType::VIDEO_ENCODE && queueFamilyVKDesc.queueNum)
+                m_VideoCodecOperations[(size_t)QueueType::VIDEO_ENCODE] = familyVideoProps[queueFamilyVKDesc.familyIndex].videoCodecOperations & VIDEO_ENCODE_CODEC_OPERATION_MASK;
         }
     } else {
-        uint32_t familyNum = 0;
-        m_VK.GetPhysicalDeviceQueueFamilyProperties2(m_PhysicalDevice, &familyNum, nullptr);
-
-        Scratch<VkQueueFamilyProperties2> familyProps2 = NRI_ALLOCATE_SCRATCH(*this, VkQueueFamilyProperties2, familyNum);
-        for (uint32_t i = 0; i < familyNum; i++)
-            familyProps2[i] = {VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2};
-
-        m_VK.GetPhysicalDeviceQueueFamilyProperties2(m_PhysicalDevice, &familyNum, familyProps2);
-
         std::array<uint32_t, (size_t)QueueType::MAX_NUM> scores = {};
         for (uint32_t i = 0; i < familyNum; i++) {
             const VkQueueFamilyProperties& familyProps = familyProps2[i].queueFamilyProperties;
+            const VkVideoCodecOperationFlagsKHR videoCodecOperations = familyVideoProps[i].videoCodecOperations;
 
             QueueFamilyProps props = {};
             props.queueCount = familyProps.queueCount;
+            props.videoDecodeCodecNum = GetVideoCodecNum(videoCodecOperations, true);
+            props.videoEncodeCodecNum = GetVideoCodecNum(videoCodecOperations, false);
             props.graphics = familyProps.queueFlags & VK_QUEUE_GRAPHICS_BIT;
             props.compute = familyProps.queueFlags & VK_QUEUE_COMPUTE_BIT;
             props.copy = familyProps.queueFlags & VK_QUEUE_TRANSFER_BIT;
             props.sparse = familyProps.queueFlags & VK_QUEUE_SPARSE_BINDING_BIT;
-            props.videoDecode = familyProps.queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR;
-            props.videoEncode = familyProps.queueFlags & VK_QUEUE_VIDEO_ENCODE_BIT_KHR;
+            props.videoDecode = (familyProps.queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) && props.videoDecodeCodecNum;
+            props.videoEncode = (familyProps.queueFlags & VK_QUEUE_VIDEO_ENCODE_BIT_KHR) && props.videoEncodeCodecNum;
             props.protect = familyProps.queueFlags & VK_QUEUE_PROTECTED_BIT;
             props.opticalFlow = familyProps.queueFlags & VK_QUEUE_OPTICAL_FLOW_BIT_NV;
 
             QueueType queueType = TrySelectPreferredQueueType(props, scores);
-            if (queueType != QueueType::MAX_NUM)
+            while (queueType != QueueType::MAX_NUM) {
                 queueFamilyIndices[(size_t)queueType] = i;
+
+                if (queueType == QueueType::VIDEO_DECODE)
+                    m_VideoCodecOperations[(size_t)QueueType::VIDEO_DECODE] = videoCodecOperations & VIDEO_DECODE_CODEC_OPERATION_MASK;
+                else if (queueType == QueueType::VIDEO_ENCODE)
+                    m_VideoCodecOperations[(size_t)QueueType::VIDEO_ENCODE] = videoCodecOperations & VIDEO_ENCODE_CODEC_OPERATION_MASK;
+
+                queueType = TrySelectPreferredQueueType(props, scores);
+            }
         }
     }
 
@@ -633,6 +842,35 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
 
     if (!isWrapper)
         ProcessDeviceExtensions(desiredDeviceExts, desc.disableVKRayTracing, desc.deviceLostInfoLevel);
+
+    { // Video codec operations enabled on the device
+        VkVideoCodecOperationFlagsKHR enabledDecodeCodecOperations = 0;
+        VkVideoCodecOperationFlagsKHR enabledEncodeCodecOperations = 0;
+        const bool isVideoQueueEnabled = IsExtensionSupported(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME, desiredDeviceExts);
+        const bool isVideoDecodeQueueEnabled = isVideoQueueEnabled && IsExtensionSupported(VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME, desiredDeviceExts);
+        const bool isVideoEncodeQueueEnabled = isVideoQueueEnabled && IsExtensionSupported(VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME, desiredDeviceExts);
+
+        if (isVideoDecodeQueueEnabled && IsExtensionSupported(VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME, desiredDeviceExts))
+            enabledDecodeCodecOperations |= VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+
+        if (isVideoDecodeQueueEnabled && IsExtensionSupported(VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME, desiredDeviceExts))
+            enabledDecodeCodecOperations |= VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+
+        if (isVideoDecodeQueueEnabled && IsExtensionSupported(VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME, desiredDeviceExts))
+            enabledDecodeCodecOperations |= VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
+
+        if (isVideoEncodeQueueEnabled && IsExtensionSupported(VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME, desiredDeviceExts))
+            enabledEncodeCodecOperations |= VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR;
+
+        if (isVideoEncodeQueueEnabled && IsExtensionSupported(VK_KHR_VIDEO_ENCODE_H265_EXTENSION_NAME, desiredDeviceExts))
+            enabledEncodeCodecOperations |= VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR;
+
+        if (isVideoEncodeQueueEnabled && IsExtensionSupported(VK_KHR_VIDEO_ENCODE_AV1_EXTENSION_NAME, desiredDeviceExts))
+            enabledEncodeCodecOperations |= VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR;
+
+        m_VideoCodecOperations[(size_t)QueueType::VIDEO_DECODE] &= enabledDecodeCodecOperations;
+        m_VideoCodecOperations[(size_t)QueueType::VIDEO_ENCODE] &= enabledEncodeCodecOperations;
+    }
 
     NRI_REPORT_INFO(this, "Using Vulkan v1.%u (%u device extensions initialized)", m_MinorVersion, (uint32_t)desiredDeviceExts.size());
 
@@ -686,6 +924,9 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
     PNEXTCHAIN_APPEND_FEATURES(true, KHR, ShaderClock, SHADER_CLOCK);
     PNEXTCHAIN_APPEND_FEATURES(true, KHR, DynamicRenderingLocalRead, DYNAMIC_RENDERING_LOCAL_READ);
     PNEXTCHAIN_APPEND_FEATURES(true, KHR, UnifiedImageLayouts, UNIFIED_IMAGE_LAYOUTS);
+    PNEXTCHAIN_APPEND_FEATURES(true, KHR, VideoEncodeAV1, VIDEO_ENCODE_AV1);
+    PNEXTCHAIN_APPEND_FEATURES(true, KHR, VideoMaintenance1, VIDEO_MAINTENANCE_1);
+    PNEXTCHAIN_APPEND_FEATURES(true, KHR, VideoMaintenance2, VIDEO_MAINTENANCE_2);
     PNEXTCHAIN_APPEND_FEATURES(true, EXT, CustomBorderColor, CUSTOM_BORDER_COLOR);
     PNEXTCHAIN_APPEND_FEATURES(true, EXT, FragmentShaderInterlock, FRAGMENT_SHADER_INTERLOCK);
     PNEXTCHAIN_APPEND_FEATURES(true, EXT, ImageSlicedViewOf3D, IMAGE_SLICED_VIEW_OF_3D);
@@ -757,6 +998,9 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
     m_IsSupported.hostImageCopy = features14.hostImageCopy;
     m_IsSupported.deviceFault = DeviceFaultFeatures.deviceFault;
     m_IsSupported.deviceFaultVendorBinary = DeviceFaultFeatures.deviceFaultVendorBinary;
+    m_IsSupported.videoMaintenance1 = VideoMaintenance1Features.videoMaintenance1;
+    m_IsSupported.videoMaintenance2 = VideoMaintenance2Features.videoMaintenance2;
+    m_IsSupported.videoEncodeAV1 = VideoEncodeAV1Features.videoEncodeAV1;
 
     m_IsMemoryZeroInitializationEnabled = desc.enableMemoryZeroInitialization && ZeroInitializeDeviceMemoryFeatures.zeroInitializeDeviceMemory;
 
@@ -787,6 +1031,7 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
 
             // Create device
             std::array<VkDeviceQueueCreateInfo, (size_t)QueueType::MAX_NUM> queueCreateInfos = {};
+            std::array<std::array<float, 256>, (size_t)QueueType::MAX_NUM> queuePriorities = {};
 
             VkDeviceCreateInfo deviceCreateInfo = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
             deviceCreateInfo.pNext = &features;
@@ -794,21 +1039,7 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
             deviceCreateInfo.enabledExtensionCount = (uint32_t)desiredDeviceExts.size();
             deviceCreateInfo.ppEnabledExtensionNames = desiredDeviceExts.data();
 
-            std::array<float, 256> zeroPriorities = {};
-
-            for (uint32_t i = 0; i < desc.queueFamilyNum; i++) {
-                const QueueFamilyDesc& queueFamily = desc.queueFamilies[i];
-                uint32_t queueFamilyIndex = queueFamilyIndices[(size_t)queueFamily.queueType];
-
-                if (queueFamily.queueNum && queueFamilyIndex != INVALID_FAMILY_INDEX) {
-                    VkDeviceQueueCreateInfo& queueCreateInfo = queueCreateInfos[deviceCreateInfo.queueCreateInfoCount++];
-
-                    queueCreateInfo = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-                    queueCreateInfo.queueCount = queueFamily.queueNum;
-                    queueCreateInfo.queueFamilyIndex = queueFamilyIndex;
-                    queueCreateInfo.pQueuePriorities = queueFamily.queuePriorities ? queueFamily.queuePriorities : zeroPriorities.data();
-                }
-            }
+            deviceCreateInfo.queueCreateInfoCount = BuildQueueCreateInfos(desc.queueFamilies, desc.queueFamilyNum, queueFamilyIndices, queueCreateInfos, queuePriorities);
 
             VkResult vkResult = m_VK.CreateDevice(m_PhysicalDevice, &deviceCreateInfo, m_AllocationCallbackPtr, &m_Device);
             NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkCreateDevice");
@@ -837,7 +1068,8 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
                     m_VK.GetDeviceQueue2(m_Device, &queueInfo, &handle);
 
                     QueueVK* queue;
-                    Result result = CreateImplementation<QueueVK>(queue, queueFamilyVKDesc.queueType, queueFamilyVKDesc.familyIndex, handle);
+                    Lock* sharedLock = FindQueueLock(m_QueueFamilies, handle);
+                    Result result = CreateImplementation<QueueVK>(queue, queueFamilyVKDesc.queueType, queueFamilyVKDesc.familyIndex, handle, sharedLock);
                     if (result == Result::SUCCESS)
                         queueFamily.push_back(queue);
                 }
@@ -862,7 +1094,8 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
                     m_VK.GetDeviceQueue2(m_Device, &queueInfo, &handle);
 
                     QueueVK* queue;
-                    Result result = CreateImplementation<QueueVK>(queue, queueFamilyDesc.queueType, queueInfo.queueFamilyIndex, handle);
+                    Lock* sharedLock = FindQueueLock(m_QueueFamilies, handle);
+                    Result result = CreateImplementation<QueueVK>(queue, queueFamilyDesc.queueType, queueInfo.queueFamilyIndex, handle, sharedLock);
                     if (result == Result::SUCCESS)
                         queueFamily.push_back(queue);
                 }
@@ -1254,6 +1487,8 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_Desc.features.calibratedTimestamps = IsExtensionSupported(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME, desiredDeviceExts);
         m_Desc.features.additionalShadingRates = FragmentShadingRateProps.maxFragmentSize.height > 2 || FragmentShadingRateProps.maxFragmentSize.width > 2;
         m_Desc.features.sumShadingRateCombiner = m_Desc.tiers.shadingRate != 0;
+        m_Desc.features.rectColorClears = true;
+        m_Desc.features.rectDepthStencilClears = true;
         m_Desc.features.regionResolve = true;
         m_Desc.features.resolveOpMinMax = m_IsSupported.maintenance10 && m_IsSupported.copyCommands2; // TODO: it's "all or nothing", without it "min/max" resolve is supported only in a render pass
         m_Desc.features.pipelineCache = true;
@@ -1267,6 +1502,7 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_Desc.features.componentSwizzle = true;
         m_Desc.features.independentFrontAndBackStencilReferenceAndMasks = true;
         m_Desc.features.filterOpMinMax = features12.samplerFilterMinmax;
+        m_Desc.features.constantAlphaBlendFactors = true;
         m_Desc.features.logicOp = features.features.logicOp;
         m_Desc.features.depthBoundsTest = features.features.depthBounds;
         m_Desc.features.drawIndirectCount = features12.drawIndirectCount;
@@ -1281,6 +1517,16 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_Desc.features.extendedDynamicState = ExtendedDynamicStateFeatures.extendedDynamicState;
         m_Desc.features.unifiedTextureLayouts = UnifiedImageLayoutsFeatures.unifiedImageLayouts;
         m_Desc.features.resourceAliasing = true;
+
+        const VkVideoCodecOperationFlagsKHR decodeCodecOperations = m_IsSupported.videoMaintenance1 ? GetVideoCodecOperations(true, false) : 0;
+        m_Desc.videoFeatures.decode.H264 = (decodeCodecOperations & VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) != 0;
+        m_Desc.videoFeatures.decode.H265 = (decodeCodecOperations & VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) != 0;
+        m_Desc.videoFeatures.decode.AV1 = (decodeCodecOperations & VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR) != 0;
+
+        const VkVideoCodecOperationFlagsKHR encodeCodecOperations = m_IsSupported.videoMaintenance1 ? GetVideoCodecOperations(false, true) : 0;
+        m_Desc.videoFeatures.encode.H264 = (encodeCodecOperations & VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR) != 0;
+        m_Desc.videoFeatures.encode.H265 = (encodeCodecOperations & VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR) != 0;
+        m_Desc.videoFeatures.encode.AV1 = (encodeCodecOperations & VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR) != 0;
 
         m_Desc.shaderFeatures.nativeI8 = features12.shaderInt8;
         m_Desc.shaderFeatures.nativeI16 = features.features.shaderInt16;
@@ -1354,16 +1600,20 @@ void DeviceVK::FillCreateInfo(const BufferDesc& bufferDesc, VkBufferCreateInfo& 
     info.sharingMode = m_NumActiveFamilyIndices <= 1 ? VK_SHARING_MODE_EXCLUSIVE : VK_SHARING_MODE_CONCURRENT;
     info.queueFamilyIndexCount = m_NumActiveFamilyIndices;
     info.pQueueFamilyIndices = m_ActiveQueueFamilyIndices.data();
+
+    if (m_IsSupported.videoMaintenance1 && (bufferDesc.usage & (BufferUsageBits::VIDEO_DECODE | BufferUsageBits::VIDEO_ENCODE)))
+        info.flags |= VK_BUFFER_CREATE_VIDEO_PROFILE_INDEPENDENT_BIT_KHR;
 }
 
 void DeviceVK::FillCreateInfo(const TextureDesc& textureDesc, VkImageCreateInfo& info) const {
     const FormatProps& formatProps = GetFormatProps(textureDesc.format);
+    const bool hasVideoUsage = (textureDesc.usage & (TextureUsageBits::VIDEO_DECODE | TextureUsageBits::VIDEO_ENCODE | TextureUsageBits::VIDEO_REFERENCE_ONLY)) != 0;
 
-    VkImageCreateFlags flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT // typeless (basic)
-        | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT                      // typeless (advanced)
-        | VK_IMAGE_CREATE_ALIAS_BIT;                              // matches https://learn.microsoft.com/en-us/windows/win32/direct3d12/memory-aliasing-and-data-inheritance#data-inheritance
+    VkImageCreateFlags flags = hasVideoUsage ? 0 : VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT // typeless (basic)
+            | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT                                      // typeless (advanced)
+            | VK_IMAGE_CREATE_ALIAS_BIT;                                              // matches https://learn.microsoft.com/en-us/windows/win32/direct3d12/memory-aliasing-and-data-inheritance#data-inheritance
 
-    if (formatProps.blockWidth > 1 && (textureDesc.usage & TextureUsageBits::SHADER_RESOURCE_STORAGE))
+    if (!hasVideoUsage && formatProps.blockWidth > 1 && (textureDesc.usage & TextureUsageBits::SHADER_RESOURCE_STORAGE))
         flags |= VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT; // format can be used to create a view with an uncompressed format (1 texel covers 1 block)
     if (textureDesc.layerNum >= 6 && textureDesc.width == textureDesc.height)
         flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT; // allow cube maps
@@ -1371,6 +1621,11 @@ void DeviceVK::FillCreateInfo(const TextureDesc& textureDesc, VkImageCreateInfo&
         flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT; // allow 3D demotion to a set of layers // TODO: hook up "VK_EXT_image_2d_view_of_3d"?
     if (m_Desc.tiers.sampleLocations && formatProps.isDepth)
         flags |= VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
+
+    const VkImageUsageFlags usage = GetImageUsageFlags(textureDesc.usage);
+    const bool hasVideoDpbUsage = (usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) != 0;
+    if (hasVideoUsage && !hasVideoDpbUsage)
+        flags |= VK_IMAGE_CREATE_VIDEO_PROFILE_INDEPENDENT_BIT_KHR;
 
     info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; // should be already set
     info.flags = flags;
@@ -1383,7 +1638,7 @@ void DeviceVK::FillCreateInfo(const TextureDesc& textureDesc, VkImageCreateInfo&
     info.arrayLayers = std::max(textureDesc.layerNum, (Dim_t)1);
     info.samples = (VkSampleCountFlagBits)std::max(textureDesc.sampleNum, (Sample_t)1);
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = GetImageUsageFlags(textureDesc.usage);
+    info.usage = usage;
     if ((textureDesc.usage & TextureUsageBits::HOST_TRANSFER) && m_IsSupported.hostImageCopy)
         info.usage |= VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
     info.sharingMode = (m_NumActiveFamilyIndices <= 1 || textureDesc.sharingMode == SharingMode::EXCLUSIVE) ? VK_SHARING_MODE_EXCLUSIVE : VK_SHARING_MODE_CONCURRENT;
@@ -1926,6 +2181,7 @@ Result DeviceVK::ResolveDispatchTable(const Vector<const char*>& desiredDeviceEx
     GET_DEVICE_CORE_FUNC(AllocateCommandBuffers);
     GET_DEVICE_CORE_FUNC(AllocateDescriptorSets);
     GET_DEVICE_CORE_FUNC(UpdateDescriptorSets);
+    GET_DEVICE_CORE_FUNC(GetQueryPoolResults);
     GET_DEVICE_CORE_FUNC(BeginCommandBuffer);
     GET_DEVICE_CORE_FUNC(CmdSetDepthBounds);
     GET_DEVICE_CORE_FUNC(CmdSetStencilReference);
@@ -2074,6 +2330,28 @@ Result DeviceVK::ResolveDispatchTable(const Vector<const char*>& desiredDeviceEx
         GET_DEVICE_FUNC(CmdDrawMeshTasksEXT);
         GET_DEVICE_FUNC(CmdDrawMeshTasksIndirectEXT);
         GET_DEVICE_FUNC(CmdDrawMeshTasksIndirectCountEXT);
+    }
+
+    if (IsExtensionSupported(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME, desiredDeviceExts)) {
+        GET_INSTANCE_FUNC(GetPhysicalDeviceVideoCapabilitiesKHR);
+        GET_INSTANCE_FUNC(GetPhysicalDeviceVideoFormatPropertiesKHR);
+        GET_DEVICE_FUNC(CreateVideoSessionKHR);
+        GET_DEVICE_FUNC(DestroyVideoSessionKHR);
+        GET_DEVICE_FUNC(GetVideoSessionMemoryRequirementsKHR);
+        GET_DEVICE_FUNC(BindVideoSessionMemoryKHR);
+        GET_DEVICE_FUNC(CreateVideoSessionParametersKHR);
+        GET_DEVICE_FUNC(DestroyVideoSessionParametersKHR);
+        GET_DEVICE_FUNC(CmdBeginVideoCodingKHR);
+        GET_DEVICE_FUNC(CmdControlVideoCodingKHR);
+        GET_DEVICE_FUNC(CmdEndVideoCodingKHR);
+    }
+
+    if (IsExtensionSupported(VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME, desiredDeviceExts))
+        GET_DEVICE_FUNC(CmdDecodeVideoKHR);
+
+    if (IsExtensionSupported(VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME, desiredDeviceExts)) {
+        GET_DEVICE_FUNC(GetEncodedVideoSessionParametersKHR);
+        GET_DEVICE_FUNC(CmdEncodeVideoKHR);
     }
 
     if (IsExtensionSupported(VK_NV_LOW_LATENCY_2_EXTENSION_NAME, desiredDeviceExts)) {
@@ -2491,6 +2769,17 @@ NRI_INLINE Result DeviceVK::GetQueue(QueueType queueType, uint32_t queueIndex, Q
     }
 
     return Result::FAILURE;
+}
+
+NRI_INLINE VkVideoCodecOperationFlagsKHR DeviceVK::GetVideoCodecOperations(bool decode, bool encode) const {
+    VkVideoCodecOperationFlagsKHR operations = 0;
+    operations |= decode ? m_VideoCodecOperations[(size_t)QueueType::VIDEO_DECODE] : 0;
+    operations |= encode ? m_VideoCodecOperations[(size_t)QueueType::VIDEO_ENCODE] : 0;
+
+    if (!m_IsSupported.videoEncodeAV1)
+        operations &= ~VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR;
+
+    return operations;
 }
 
 NRI_INLINE Result DeviceVK::WaitIdle() {
@@ -3008,96 +3297,6 @@ NRI_INLINE void DeviceVK::CopyDescriptorRanges(const CopyDescriptorRangeDesc* co
 
     m_VK.UpdateDescriptorSets(m_Device, 0, nullptr, copyDescriptorRangeDescNum, copies);
 }
-
-static void WriteSamplers(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc) {
-    VkDescriptorImageInfo* imageInfos = (VkDescriptorImageInfo*)(scratch + scratchOffset);
-    scratchOffset += rangeUpdateDesc.descriptorNum * sizeof(VkDescriptorImageInfo);
-
-    for (uint32_t i = 0; i < rangeUpdateDesc.descriptorNum; i++) {
-        const DescriptorVK& descriptorVK = *(DescriptorVK*)rangeUpdateDesc.descriptors[i];
-        imageInfos[i].imageView = VK_NULL_HANDLE;
-        imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        imageInfos[i].sampler = descriptorVK.GetSampler();
-    }
-
-    writeDescriptorSet.pImageInfo = imageInfos;
-}
-
-static void WriteTextures(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc) {
-    VkDescriptorImageInfo* imageInfos = (VkDescriptorImageInfo*)(scratch + scratchOffset);
-    scratchOffset += rangeUpdateDesc.descriptorNum * sizeof(VkDescriptorImageInfo);
-
-    for (uint32_t i = 0; i < rangeUpdateDesc.descriptorNum; i++) {
-        const DescriptorVK& descriptorVK = *(DescriptorVK*)rangeUpdateDesc.descriptors[i];
-
-        imageInfos[i].imageView = descriptorVK.GetImageView();
-        imageInfos[i].imageLayout = descriptorVK.GetTexViewDesc().expectedLayout;
-        imageInfos[i].sampler = VK_NULL_HANDLE;
-    }
-
-    writeDescriptorSet.pImageInfo = imageInfos;
-}
-
-static void WriteBuffers(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc) {
-    VkDescriptorBufferInfo* bufferInfos = (VkDescriptorBufferInfo*)(scratch + scratchOffset);
-    scratchOffset += rangeUpdateDesc.descriptorNum * sizeof(VkDescriptorBufferInfo);
-
-    for (uint32_t i = 0; i < rangeUpdateDesc.descriptorNum; i++) {
-        const DescriptorVK& descriptorVK = *(DescriptorVK*)rangeUpdateDesc.descriptors[i];
-        bufferInfos[i] = descriptorVK.GetBufferInfo();
-    }
-
-    writeDescriptorSet.pBufferInfo = bufferInfos;
-}
-
-static void WriteBufferViews(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc) {
-    VkBufferView* bufferViews = (VkBufferView*)(scratch + scratchOffset);
-    scratchOffset += rangeUpdateDesc.descriptorNum * sizeof(VkBufferView);
-
-    for (uint32_t i = 0; i < rangeUpdateDesc.descriptorNum; i++) {
-        const DescriptorVK& descriptorVK = *(DescriptorVK*)rangeUpdateDesc.descriptors[i];
-        bufferViews[i] = descriptorVK.GetBufferView();
-    }
-
-    writeDescriptorSet.pTexelBufferView = bufferViews;
-}
-
-static void WriteAccelerationStructures(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc) {
-    VkAccelerationStructureKHR* accelerationStructures = (VkAccelerationStructureKHR*)(scratch + scratchOffset);
-    scratchOffset += rangeUpdateDesc.descriptorNum * sizeof(VkAccelerationStructureKHR);
-
-    for (uint32_t i = 0; i < rangeUpdateDesc.descriptorNum; i++) {
-        const DescriptorVK& descriptorVK = *(DescriptorVK*)rangeUpdateDesc.descriptors[i];
-        accelerationStructures[i] = descriptorVK.GetAccelerationStructure();
-    }
-
-    VkWriteDescriptorSetAccelerationStructureKHR* accelerationStructureInfo = (VkWriteDescriptorSetAccelerationStructureKHR*)(scratch + scratchOffset);
-    scratchOffset += sizeof(VkWriteDescriptorSetAccelerationStructureKHR);
-
-    accelerationStructureInfo->sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
-    accelerationStructureInfo->pNext = nullptr;
-    accelerationStructureInfo->accelerationStructureCount = rangeUpdateDesc.descriptorNum;
-    accelerationStructureInfo->pAccelerationStructures = accelerationStructures;
-
-    writeDescriptorSet.pNext = accelerationStructureInfo;
-}
-
-typedef void (*WriteDescriptorsFunc)(VkWriteDescriptorSet& writeDescriptorSet, size_t& scratchOffset, uint8_t* scratch, const UpdateDescriptorRangeDesc& rangeUpdateDesc);
-
-constexpr std::array<WriteDescriptorsFunc, (size_t)DescriptorType::MAX_NUM> g_WriteFuncs = {
-    WriteSamplers,               // SAMPLER
-    nullptr,                     // MUTABLE (never used)
-    WriteTextures,               // TEXTURE
-    WriteTextures,               // STORAGE_TEXTURE
-    WriteTextures,               // INPUT_ATTACHMENT
-    WriteBufferViews,            // BUFFER
-    WriteBufferViews,            // STORAGE_BUFFER
-    WriteBuffers,                // CONSTANT_BUFFER
-    WriteBuffers,                // STRUCTURED_BUFFER
-    WriteBuffers,                // STORAGE_STRUCTURED_BUFFER
-    WriteAccelerationStructures, // ACCELERATION_STRUCTURE
-};
-NRI_VALIDATE_ARRAY_BY_PTR(g_WriteFuncs);
 
 NRI_INLINE void DeviceVK::UpdateDescriptorRanges(const UpdateDescriptorRangeDesc* updateDescriptorRangeDescs, uint32_t updateDescriptorRangeDescNum) {
     // Count and allocate scratch memory
