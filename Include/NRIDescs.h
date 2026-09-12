@@ -76,7 +76,7 @@ NriStruct(Float2_t) {
 
 // Aliases
 static const uint32_t NriConstant(BGRA_UNUSED) = 0;     // only for "bgra" color for profiling
-static const uint32_t NriConstant(ALL) = 0;             // only for "sampleMask" and "descriptorNum"
+static const uint32_t NriConstant(ALL) = 0;             // only for "sampleMask"
 static const Nri(Dim_t) NriConstant(WHOLE_SIZE) = 0;    // only for "Dim_t" and "size"
 static const Nri(Dim_t) NriConstant(REMAINING) = 0;     // only for "mipNum" and "layerNum"
 
@@ -1020,8 +1020,13 @@ NriBits(DescriptorSetBits, uint8_t,
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkDescriptorBindingFlagBits.html
 NriBits(DescriptorRangeBits, uint8_t,
     NONE                                    = 0,
+
+    // Requires "tiers.resourceBinding >= 1"; descriptor validity is additionally restricted by the tier
     PARTIALLY_BOUND                         = NriBit(0),    // descriptors in range may not contain valid descriptors at the time the descriptors are consumed (but referenced descriptors must be valid)
     ARRAY                                   = NriBit(1),    // descriptors in range are organized into an array
+
+    // Requires "tiers.bindless >= 1" and "tiers.resourceBinding >= 2"
+    // VK: only one range per set, resolving to the highest binding number after applying "VKBindingOffsets"
     VARIABLE_SIZED_ARRAY                    = NriBit(2),    // descriptors in range are organized into a variable-sized array, which size is specified via "variableDescriptorNum" argument of "AllocateDescriptorSets" function
 
     // https://docs.vulkan.org/samples/latest/samples/extensions/descriptor_indexing/README.html#_update_after_bind_streaming_descriptors_concurrently
@@ -1180,7 +1185,7 @@ NriStruct(CopyDescriptorRangeDesc) {
     const NriPtr(DescriptorSet) srcDescriptorSet; // must be allocated from a "DescriptorPool" with "DescriptorPoolBits::COPY_SOURCE"
     uint32_t srcRangeIndex;
     uint32_t srcBaseDescriptor;
-    uint32_t descriptorNum;         // can be "ALL" (source)
+    uint32_t descriptorNum;         // must be > 0
 };
 
 // Binding
@@ -1618,15 +1623,16 @@ NriStruct(ComputePipelineDesc) {
 // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_render_pass_beginning_access_type
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkAttachmentLoadOp.html
 NriEnum(LoadOp, uint8_t,
-    LOAD,
-    CLEAR
+    LOAD,       // loads the existing attachment contents
+    CLEAR       // clears the attachment using "AttachmentDesc::clearValue"
 );
 
 // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_render_pass_ending_access_type
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkAttachmentStoreOp.html
 NriEnum(StoreOp, uint8_t,
-    STORE,
-    DISCARD
+    STORE,      // stores the attachment contents
+    DISCARD,    // makes the attachment contents undefined
+    NONE        // performs no store access if the attachment is not written, otherwise acts like "DISCARD"
 );
 
 // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resolve_mode
@@ -2149,11 +2155,15 @@ NriStruct(DeviceDesc) {
 
         // https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html#limitations-on-static-samplers
         // 0 - ALL descriptors in range must be valid by the time the command list executes
+        //       GPUs: rare
         // 1 - only "CONSTANT_BUFFER" and "STORAGE" descriptors in range must be valid
+        //       GPUs: NVIDIA GTX 6xx, 7xx, 9xx & 10xx series
         // 2 - only referenced descriptors must be valid
+        //       GPUs: NVIDIA GTX 16xx & RTX series, AMD R9 & RX series, Intel Arc & Skylake+
         uint8_t resourceBinding;
 
-        // 1 - unbound arrays with dynamic indexing
+        // Descriptor array indexing
+        // 1 - unbounded arrays with dynamic indexing
         // 2 - D3D12 dynamic resources: https://microsoft.github.io/DirectX-Specs/d3d/HLSL_SM_6_6_DynamicResources.html
         uint8_t bindless;
 

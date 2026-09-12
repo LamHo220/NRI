@@ -551,8 +551,10 @@ void DeviceVK::ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, b
     APPEND_EXT(m_MinorVersion < 4, VK_KHR_MAINTENANCE_6_EXTENSION_NAME);
     APPEND_EXT(m_MinorVersion < 4, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     APPEND_EXT(m_MinorVersion < 4, VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
+    APPEND_EXT(m_MinorVersion < 4, VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME);
     APPEND_EXT(m_MinorVersion < 4, VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME);
     APPEND_EXT(m_MinorVersion < 4, VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME);
+    APPEND_EXT(m_MinorVersion < 4, VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME);
 
     APPEND_EXT(!disableRayTracing, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
     APPEND_EXT(!disableRayTracing, VK_KHR_RAY_QUERY_EXTENSION_NAME);
@@ -982,6 +984,10 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
     m_IsSupported.maintenance10 = Maintenance10Features.maintenance10;
     m_IsSupported.deviceAddress = features12.bufferDeviceAddress;
     m_IsSupported.dynamicRendering = features13.dynamicRendering;
+    m_IsSupported.storeOpNone = m_MinorVersion >= 3 ||
+        IsExtensionSupported(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, desiredDeviceExts) ||
+        IsExtensionSupported(VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME, desiredDeviceExts) ||
+        IsExtensionSupported(VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME, desiredDeviceExts);
     m_IsSupported.copyCommands2 = m_MinorVersion > 2 || IsExtensionSupported(VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME, desiredDeviceExts);
     m_IsSupported.swapChainMutableFormat = IsExtensionSupported(VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME, desiredDeviceExts);
     m_IsSupported.presentId = PresentIdFeatures.presentId;
@@ -1468,8 +1474,8 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
             m_Desc.tiers.shadingRate = 2;
 
         // TODO: seems to be the best match
-        m_Desc.tiers.bindless = features12.descriptorIndexing ? 1 : 0;
-        m_Desc.tiers.resourceBinding = 2;
+        m_Desc.tiers.bindless = (features12.descriptorIndexing && features12.descriptorBindingVariableDescriptorCount) ? 1 : 0;
+        m_Desc.tiers.resourceBinding = features12.descriptorBindingPartiallyBound ? 2 : 0;
         m_Desc.tiers.memory = 1;
 
         m_Desc.features.swapChain = IsExtensionSupported(VK_KHR_SWAPCHAIN_EXTENSION_NAME, desiredDeviceExts);
@@ -3270,17 +3276,13 @@ NRI_INLINE void DeviceVK::CopyDescriptorRanges(const CopyDescriptorRangeDesc* co
         const DescriptorRangeDesc& dstRangeDesc = dst.GetDesc()->ranges[copyDescriptorSetDesc.dstRangeIndex];
         const DescriptorRangeDesc& srcRangeDesc = src.GetDesc()->ranges[copyDescriptorSetDesc.srcRangeIndex];
 
-        uint32_t descriptorNum = copyDescriptorSetDesc.descriptorNum;
-        if (descriptorNum == ALL)
-            descriptorNum = srcRangeDesc.descriptorNum;
-
         VkCopyDescriptorSet& copy = copies[i];
         copy = {VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET};
         copy.srcSet = src.GetHandle();
         copy.srcBinding = srcRangeDesc.baseRegisterIndex;
         copy.dstSet = dst.GetHandle();
         copy.dstBinding = dstRangeDesc.baseRegisterIndex;
-        copy.descriptorCount = descriptorNum;
+        copy.descriptorCount = copyDescriptorSetDesc.descriptorNum;
 
         bool isSrcArray = srcRangeDesc.flags & (DescriptorRangeBits::ARRAY | DescriptorRangeBits::VARIABLE_SIZED_ARRAY);
         if (isSrcArray)
