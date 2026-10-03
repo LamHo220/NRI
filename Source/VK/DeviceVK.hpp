@@ -526,6 +526,9 @@ void DeviceVK::ProcessInstanceExtensions(Vector<const char*>& desiredInstanceExt
 #ifdef VK_USE_PLATFORM_METAL_EXT
         desiredInstanceExts.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
 #endif
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
+        desiredInstanceExts.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+#endif
     }
 
     if (IsExtensionSupported(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME, supportedExts))
@@ -1950,8 +1953,15 @@ Result DeviceVK::CreateInstance(bool enableGraphicsAPIValidation, const Vector<c
 
     FilterInstanceLayers(layers);
 
+    PFN_vkEnumerateInstanceVersion vkEnumerateInstanceVersion = (PFN_vkEnumerateInstanceVersion)m_VK.GetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
+    NRI_RETURN_ON_FAILURE(this, vkEnumerateInstanceVersion, Result::UNSUPPORTED, "Vulkan 1.0 loader is not supported");
+
+    uint32_t instanceVersion = 0;
+    VkResult vkResult = vkEnumerateInstanceVersion(&instanceVersion);
+    NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkEnumerateInstanceVersion");
+
     VkApplicationInfo appInfo = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    appInfo.apiVersion = VK_API_VERSION_1_4;
+    appInfo.apiVersion = std::clamp(instanceVersion, VK_API_VERSION_1_2, VK_API_VERSION_1_4);
 
     const VkValidationFeatureEnableEXT enabledValidationFeatures[] = {
         VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT, // TODO: add VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT?
@@ -1988,7 +1998,7 @@ Result DeviceVK::CreateInstance(bool enableGraphicsAPIValidation, const Vector<c
     if (enableGraphicsAPIValidation)
         PNEXTCHAIN_APPEND_STRUCT(validationFeatures);
 
-    VkResult vkResult = m_VK.CreateInstance(&instanceCreateInfo, m_AllocationCallbackPtr, &m_Instance);
+    vkResult = m_VK.CreateInstance(&instanceCreateInfo, m_AllocationCallbackPtr, &m_Instance);
     NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkCreateInstance");
 
     if (enableGraphicsAPIValidation) {
@@ -2166,6 +2176,9 @@ Result DeviceVK::ResolveInstanceDispatchTable(const Vector<const char*>& desired
 #endif
 #ifdef VK_USE_PLATFORM_METAL_EXT
         GET_INSTANCE_FUNC(CreateMetalSurfaceEXT);
+#endif
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
+        GET_INSTANCE_FUNC(CreateAndroidSurfaceKHR);
 #endif
     }
 
@@ -2818,7 +2831,7 @@ NRI_INLINE Result DeviceVK::GetQueue(QueueType queueType, uint32_t queueIndex, Q
         return Result::SUCCESS;
     }
 
-    return Result::FAILURE;
+    return Result::INVALID_ARGUMENT;
 }
 
 NRI_INLINE VkVideoCodecOperationFlagsKHR DeviceVK::GetVideoCodecOperations(bool decode, bool encode) const {

@@ -133,12 +133,13 @@ static bool IsViewTypeSupported(const TextureDesc& textureDesc, TextureView text
 DeviceVal::DeviceVal(const CallbackInterface& callbacks, const AllocationCallbacks& allocationCallbacks, DeviceBase& device)
     : DeviceBase(callbacks, allocationCallbacks, NRI_OBJECT_SIGNATURE)
     , m_Impl(*(Device*)&device)
+    , m_Queues(GetStdAllocator())
     , m_MemoryTypeMap(GetStdAllocator()) {
 }
 
 DeviceVal::~DeviceVal() {
-    for (size_t i = 0; i < m_Queues.size(); i++)
-        Destroy(m_Queues[i]);
+    for (const auto& queue : m_Queues)
+        Destroy(queue.second);
 
     if (m_Name) {
         const auto& allocationCallbacks = GetAllocationCallbacks();
@@ -184,6 +185,24 @@ void DeviceVal::Destruct() {
 
 NRI_INLINE Result DeviceVal::CreateSwapChain(const SwapChainDesc& swapChainDesc, SwapChain*& swapChain) {
     NRI_RETURN_ON_FAILURE(this, swapChainDesc.queue != nullptr, Result::INVALID_ARGUMENT, "'queue' is NULL");
+
+    bool isWindowValid = false;
+#if defined(__ANDROID__)
+    isWindowValid = swapChainDesc.window.android.nativeWindow != nullptr;
+#elif defined(_WIN32)
+    isWindowValid = swapChainDesc.window.windows.hwnd != nullptr;
+#elif defined(__APPLE__)
+    isWindowValid = swapChainDesc.window.metal.caMetalLayer != nullptr;
+#else
+#    if NRI_ENABLE_XLIB_SUPPORT
+    isWindowValid = swapChainDesc.window.x11.dpy != nullptr && swapChainDesc.window.x11.window != 0;
+#    endif
+#    if NRI_ENABLE_WAYLAND_SUPPORT
+    isWindowValid = isWindowValid || (swapChainDesc.window.wayland.display != nullptr && swapChainDesc.window.wayland.surface != nullptr);
+#    endif
+#endif
+    NRI_RETURN_ON_FAILURE(this, isWindowValid, Result::INVALID_ARGUMENT, "'window' is invalid");
+
     NRI_RETURN_ON_FAILURE(this, swapChainDesc.width != 0, Result::INVALID_ARGUMENT, "'width' is 0");
     NRI_RETURN_ON_FAILURE(this, swapChainDesc.height != 0, Result::INVALID_ARGUMENT, "'height' is 0");
     NRI_RETURN_ON_FAILURE(this, swapChainDesc.textureNum != 0, Result::INVALID_ARGUMENT, "'textureNum' is invalid");
@@ -218,11 +237,14 @@ NRI_INLINE Result DeviceVal::GetQueue(QueueType queueType, uint32_t queueIndex, 
 
     queue = nullptr;
     if (result == Result::SUCCESS) {
-        const uint32_t index = (uint32_t)queueType;
-        if (!m_Queues[index])
-            m_Queues[index] = Allocate<QueueVal>(GetAllocationCallbacks(), *this, queueImpl, queueType);
+        ExclusiveScope lock(m_Lock);
 
-        queue = (Queue*)m_Queues[index];
+        const uint64_t key = ((uint64_t)queueType << 32) | queueIndex;
+        QueueVal*& queueVal = m_Queues[key];
+        if (!queueVal)
+            queueVal = Allocate<QueueVal>(GetAllocationCallbacks(), *this, queueImpl, queueType);
+
+        queue = (Queue*)queueVal;
     }
 
     return result;
@@ -1110,22 +1132,25 @@ NRI_INLINE Result DeviceVal::AllocateMemory(const AllocateMemoryDesc& allocateMe
     NRI_RETURN_ON_FAILURE(this, allocateMemoryDesc.size != 0, Result::INVALID_ARGUMENT, "'size' is 0");
     NRI_RETURN_ON_FAILURE(this, allocateMemoryDesc.priority >= -1.0f && allocateMemoryDesc.priority <= 1.0f, Result::INVALID_ARGUMENT, "'priority' outside of [-1; 1] range");
 
-    std::unordered_map<MemoryType, MemoryLocation>::iterator it;
-    std::unordered_map<MemoryType, MemoryLocation>::iterator end;
+    MemoryLocation memoryLocation = {};
+    bool memoryTypeFound = false;
     {
         ExclusiveScope lock(m_Lock);
-        it = m_MemoryTypeMap.find(allocateMemoryDesc.type);
-        end = m_MemoryTypeMap.end();
+        const auto it = m_MemoryTypeMap.find(allocateMemoryDesc.type);
+        if (it != m_MemoryTypeMap.end()) {
+            memoryLocation = it->second;
+            memoryTypeFound = true;
+        }
     }
 
-    NRI_RETURN_ON_FAILURE(this, it != end, Result::FAILURE, "'memoryType' is invalid");
+    NRI_RETURN_ON_FAILURE(this, memoryTypeFound, Result::FAILURE, "'memoryType' is invalid");
 
     Memory* memoryImpl = nullptr;
     Result result = m_iCoreImpl.AllocateMemory(m_Impl, allocateMemoryDesc, memoryImpl);
 
     memory = nullptr;
     if (result == Result::SUCCESS)
-        memory = (Memory*)Allocate<MemoryVal>(GetAllocationCallbacks(), *this, memoryImpl, allocateMemoryDesc.size, it->second);
+        memory = (Memory*)Allocate<MemoryVal>(GetAllocationCallbacks(), *this, memoryImpl, allocateMemoryDesc.size, memoryLocation);
 
     return result;
 }

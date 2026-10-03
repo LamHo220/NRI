@@ -1138,6 +1138,7 @@ void DeviceD3D12::FillDesc(bool disableD3D12EnhancedBarrier) {
     }
 
     m_Desc.other.timestampFrequencyHz = timestampFrequency;
+    m_Desc.other.timestampCopyQueueResolveOnCopyQueue = true;
     m_Desc.other.drawIndirectMaxNum = (1ull << D3D12_REQ_DRAWINDEXED_INDEX_COUNT_2_TO_EXP) - 1;
     m_Desc.other.samplerLodBiasMax = D3D12_MIP_LOD_BIAS_MAX;
     m_Desc.other.samplerAnisotropyMax = D3D12_DEFAULT_MAX_ANISOTROPY;
@@ -1861,7 +1862,7 @@ NRI_INLINE Result DeviceD3D12::GetQueue(QueueType queueType, uint32_t queueIndex
         return Result::SUCCESS;
     }
 
-    return Result::FAILURE;
+    return Result::INVALID_ARGUMENT;
 }
 
 NRI_INLINE Result DeviceD3D12::WaitIdle() {
