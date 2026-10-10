@@ -7,7 +7,6 @@ struct RequestDeviceContext {
 };
 
 static inline bool IsSameAdapter(const AdapterDesc& adapterDesc, const WGPUAdapterInfo& adapterInfo) {
-
     if (adapterDesc.vendor != Vendor::UNKNOWN && adapterDesc.deviceId && adapterInfo.vendorID && adapterInfo.deviceID)
         return adapterDesc.vendor == GetVendorFromID(adapterInfo.vendorID) && adapterDesc.deviceId == adapterInfo.deviceID;
 
@@ -17,7 +16,6 @@ static inline bool IsSameAdapter(const AdapterDesc& adapterDesc, const WGPUAdapt
 }
 
 static inline bool IsAdapterSupported(WGPUAdapter adapter) {
-
     if (wgpuAdapterHasFeature(adapter, (WGPUFeatureName)WGPUNativeFeature_Immediates) != WGPU_TRUE)
         return false;
 
@@ -467,6 +465,10 @@ void DeviceWGPU::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.tiers.resourceBinding = 0;
     m_Desc.tiers.bindless = 0;
     m_Desc.tiers.memory = 1;
+
+    // Resolve: render pass resolves only ("CmdResolveTexture" uses a render pass)
+    m_Desc.resolve.attachment.color = ResolveOpBits::AVERAGE;
+    m_Desc.resolve.command.color = ResolveOpBits::AVERAGE;
 
     // TODO: Unsupported WebGPU features are intentionally left false/zero in "DeviceDesc"; add explicit caps only when WGPU can back the NRI behavior.
     m_Desc.features.swapChain = true;

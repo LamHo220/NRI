@@ -172,11 +172,11 @@ static inline D3D12_BARRIER_ACCESS GetBarrierAccessFlags(AccessBits accessBits) 
     if (accessBits & AccessBits::SHADING_RATE_ATTACHMENT)
         flags |= D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE;
 
-    if (accessBits & AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE)
-        flags |= D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE;
-
-    if (accessBits & AccessBits::DEPTH_STENCIL_ATTACHMENT_READ)
+    // D3D12 READ is for read-only depth/stencil; WRITE also covers depth testing
+    if ((accessBits & AccessBits::DEPTH_STENCIL_ATTACHMENT_READ) && !(accessBits & AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE))
         flags |= D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ;
+    else if (accessBits & AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE)
+        flags |= D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE;
 
     if (accessBits & (AccessBits::ACCELERATION_STRUCTURE_READ | AccessBits::MICROMAP_READ))
         flags |= D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ;
@@ -246,6 +246,9 @@ static constexpr D3D12_BARRIER_LAYOUT GetBarrierLayout(Layout layout, AccessBits
     if (layout == Layout::INPUT_ATTACHMENT && (accessBits & AccessBits::INPUT_ATTACHMENT) != 0)
         return D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
 
+    if (layout == Layout::DEPTH_STENCIL_READONLY && (accessBits & AccessBits::SHADER_RESOURCE) != 0)
+        return D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ;
+
     if (layout == Layout::VIDEO_DECODE_DPB)
         return ((accessBits & AccessBits::VIDEO_DECODE_WRITE) != 0) ? D3D12_BARRIER_LAYOUT_VIDEO_DECODE_WRITE : D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ;
 
@@ -274,10 +277,10 @@ static inline D3D12_RESOURCE_STATES GetResourceStates(AccessBits accessBits, D3D
     if (accessBits & AccessBits::SHADING_RATE_ATTACHMENT)
         resourceStates |= D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE;
 
-    if (accessBits & AccessBits::DEPTH_STENCIL_ATTACHMENT_READ)
+    // DEPTH_WRITE is mutually exclusive with DEPTH_READ
+    if ((accessBits & AccessBits::DEPTH_STENCIL_ATTACHMENT_READ) && !(accessBits & AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE))
         resourceStates |= D3D12_RESOURCE_STATE_DEPTH_READ;
-
-    if (accessBits & AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE)
+    else if (accessBits & AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE)
         resourceStates |= D3D12_RESOURCE_STATE_DEPTH_WRITE;
 
     if (accessBits & AccessBits::SHADER_RESOURCE) {
@@ -414,6 +417,7 @@ constexpr std::array<D3D12_RESOLVE_MODE, (size_t)ResolveOp::MAX_NUM> g_ResolveOp
     D3D12_RESOLVE_MODE_AVERAGE, // AVERAGE
     D3D12_RESOLVE_MODE_MIN,     // MIN
     D3D12_RESOLVE_MODE_MAX,     // MAX
+    D3D12_RESOLVE_MODE_AVERAGE, // SAMPLE_ZERO (unsupported, rejected by validation)
 };
 NRI_VALIDATE_ARRAY(g_ResolveOps);
 
