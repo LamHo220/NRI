@@ -22,7 +22,13 @@ Result DescriptorHeapD3D12::CreateHeap(DescriptorHeapType type, uint32_t descrip
     NRI_RETURN_ON_BAD_HRESULT(&m_Device, hr, "ID3D12Device::CreateDescriptorHeap");
 
     m_HeapHandles[m_HeapNum++] = m_Heaps[type];
+#if defined(_MVC_VER) || !defined(_WIN32)
     m_BaseHandles[type] = m_Heaps[type]->GetCPUDescriptorHandleForHeapStart().ptr;
+#else
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle;
+    m_Heaps[type]->GetCPUDescriptorHandleForHeapStart(&cpuHandle);
+    m_BaseHandles[type] = cpuHandle.ptr;
+#endif
     m_DescriptorSizes[type] = m_Device->GetDescriptorHandleIncrementSize(desc.Type);
 
     return Result::SUCCESS;
