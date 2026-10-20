@@ -262,9 +262,9 @@ static inline void FillRenderingAttachmentInfo(VkRenderingAttachmentInfo& attach
         attachmentInfo.resolveImageLayout = resolveDst.GetTexViewDesc().expectedLayout;
     }
 
-    // If "INPUT_ATTACHMENT" usage is set, "VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ" is expected
+    // Default views of "INPUT_ATTACHMENT" textures use "VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ"
     const TextureDesc& textureDesc = texViewDesc.texture->GetDesc();
-    if (textureDesc.usage & TextureUsageBits::INPUT_ATTACHMENT)
+    if ((textureDesc.usage & TextureUsageBits::INPUT_ATTACHMENT) && !texViewDesc.hasExplicitLayout)
         attachmentInfo.imageLayout = VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ;
 
     Dim_t w = texViewDesc.texture->GetSize(0, texViewDesc.mipOffset);
@@ -2557,6 +2557,7 @@ NRI_INLINE void CommandBufferVK::Barrier(const BarrierDesc& barrierDesc) {
         const TextureVK& textureVK = *(TextureVK*)in.texture;
         const QueueVK* srcQueue = (QueueVK*)in.srcQueue;
         const QueueVK* dstQueue = (QueueVK*)in.dstQueue;
+        const bool isConcurrent = textureVK.IsConcurrent();
 
         VkImageAspectFlags aspectFlags = GetImageAspectFlags(in.planes, textureVK.GetDesc().format);
 
@@ -2568,8 +2569,8 @@ NRI_INLINE void CommandBufferVK::Barrier(const BarrierDesc& barrierDesc) {
         out.dstAccessMask = GetAccessFlags(in.after.access);
         out.oldLayout = GetImageLayout(in.before.layout);
         out.newLayout = GetImageLayout(in.after.layout);
-        out.srcQueueFamilyIndex = in.srcQueue ? srcQueue->GetFamilyIndex() : VK_QUEUE_FAMILY_IGNORED;
-        out.dstQueueFamilyIndex = in.dstQueue ? dstQueue->GetFamilyIndex() : VK_QUEUE_FAMILY_IGNORED;
+        out.srcQueueFamilyIndex = (in.srcQueue && !isConcurrent) ? srcQueue->GetFamilyIndex() : VK_QUEUE_FAMILY_IGNORED;
+        out.dstQueueFamilyIndex = (in.dstQueue && !isConcurrent) ? dstQueue->GetFamilyIndex() : VK_QUEUE_FAMILY_IGNORED;
         out.image = textureVK.GetHandle();
         out.subresourceRange = {
             aspectFlags,

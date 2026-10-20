@@ -106,8 +106,9 @@ NriBits(GraphicsAPI, uint8_t,
 
 NriEnum(Result, int8_t,
     // All bad, but optionally require an action ("callbackInterface.AbortExecution" is not triggered)
+    NOT_READY               = -4,   // WGPU: no swap chain texture available yet, skip the frame and retry after processing window events
     DEVICE_LOST             = -3,   // may be returned by "QueueSubmit*", "*WaitIdle", "AcquireNextTexture", "QueuePresent", "WaitForPresent"
-    OUT_OF_DATE             = -2,   // VK: swap chain is out of date, can be triggered if "features.resizableSwapChain" is not supported; D3D12: shader cache is stale
+    OUT_OF_DATE             = -2,   // VK/WGPU: swap chain is out of date, can be triggered if "features.resizableSwapChain" is not supported; D3D12: shader cache is stale
     INVALID_SDK             = -1,   // D3D12: some interfaces are missing (potential reasons: unable to load "D3D12Core.dll", version or SDK mismatch, developer mode is not enabled)
 
     // All good
@@ -432,6 +433,9 @@ NriBits(FormatSupportBits, uint32_t,
 //   - "AccessBits" corresponding with any relevant resource usage after the barrier completes
 //   - "StagesBits" of all subsequent GPU work that must wait until the barrier execution is finished (stages to halt until the barrier is executed)
 //   - "Layout" for textures
+// D3D12 enhanced texture barriers:
+//   - With a defined layout and stages other than "StageBits::NONE", "AccessBits::NONE" uses conservative "COMMON" access to preserve execution dependencies (may flush caches)
+//   - "StageBits::NONE" requires no accesses or barriers to the affected subresources on that side within the same "QueueSubmit" scope
 // If "features.enhancedBarriers" is not supported:
 //   - https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html#compatibility-with-legacy-d3d12_resource_states
 //   - "AccessBits::NONE" gets mapped to "COMMON" (aka "GENERAL" access), leading to potential discrepancies with VK
@@ -470,7 +474,7 @@ NriBits(StageBits, uint32_t,
     MICROMAP                        = NriBit(19),   // Invoked by "Cmd*Micromap*" commands
 
     // Other
-    COPY                            = NriBit(20),   // Invoked by "CmdCopy*", "CmdUpload*" and "CmdReadback*"
+    COPY                            = NriBit(20),   // Invoked by "CmdCopy*", "CmdUpload*", "CmdReadback*" and "CmdZeroBuffer"
     RESOLVE                         = NriBit(21),   // Invoked by "CmdResolveTexture"
     CLEAR_STORAGE                   = NriBit(22),   // Invoked by "CmdClearStorage"
 
@@ -589,7 +593,7 @@ NriBits(AccessBits, uint32_t,
                                     | NriMember(AccessBits, VIDEO_ENCODE_WRITE)
 );
 
-// "Layout" is ignored if "features.enhancedBarriers" is not supported
+// "Layout" in barriers is ignored if "features.enhancedBarriers" is not supported
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkImageLayout.html
 // https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html#d3d12_barrier_layout
 NriEnum(Layout, uint8_t,            // Compatible "AccessBits":
@@ -601,9 +605,9 @@ NriEnum(Layout, uint8_t,            // Compatible "AccessBits":
     // Attachment
     COLOR_ATTACHMENT,                   // COLOR_ATTACHMENT_READ/WRITE
     DEPTH_STENCIL_ATTACHMENT,           // DEPTH_STENCIL_ATTACHMENT_READ/WRITE
-    DEPTH_READONLY_STENCIL_ATTACHMENT,  // DEPTH_STENCIL_ATTACHMENT_READ/WRITE (accessible "planes" = "STENCIL"), SHADER_RESOURCE (accessible "planes" = "DEPTH")
-    DEPTH_ATTACHMENT_STENCIL_READONLY,  // DEPTH_STENCIL_ATTACHMENT_READ/WRITE (accessible "planes" = "DEPTH"), SHADER_RESOURCE (accessible "planes" = "STENCIL")
-    DEPTH_STENCIL_READONLY,             // DEPTH_STENCIL_ATTACHMENT_READ  (accessible "planes" = "NONE"), SHADER_RESOURCE (D3D12: graphics queue only)
+    DEPTH_READONLY_STENCIL_ATTACHMENT,  // DEPTH_STENCIL_ATTACHMENT_READ/WRITE (only stencil writable), SHADER_RESOURCE (depth plane)
+    DEPTH_ATTACHMENT_STENCIL_READONLY,  // DEPTH_STENCIL_ATTACHMENT_READ/WRITE (only depth writable), SHADER_RESOURCE (stencil plane)
+    DEPTH_STENCIL_READONLY,             // DEPTH_STENCIL_ATTACHMENT_READ, SHADER_RESOURCE (D3D12: graphics queue only)
     SHADING_RATE_ATTACHMENT,            // SHADING_RATE_ATTACHMENT
     INPUT_ATTACHMENT,                   // COLOR_ATTACHMENT, INPUT_ATTACHMENT
 
@@ -658,6 +662,7 @@ NriStruct(TextureBarrierDesc) {
     Nri(Dim_t) layerNum;    // can be "REMAINING"
     Nri(PlaneBits) planes;
 
+    // Source and destination queues for the "before" and "after" sides of a cross-queue texture hand-off. Specify both queues regardless of sharing mode.
     // Queue ownership transfer is potentially needed only for "SharingMode::EXCLUSIVE" textures
     // https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#synchronization-queue-transfers
     NriOptional NriPtr(Queue) srcQueue;
@@ -944,8 +949,11 @@ NriStruct(TextureViewDesc) {
     Nri(Dim_t) layerNum;                    // can be "REMAINING"
     Nri(Dim_t) sliceOffset;
     Nri(Dim_t) sliceNum;                    // can be "REMAINING" (METAL: used only by "CmdClearStorage", shader views expose all slices, attachments use "sliceOffset")
-    Nri(PlaneBits) planes;                  // accessible planes (missing planes for a "DEPTH_STENCIL_ATTACHMENT" are considered read-only)
+    Nri(PlaneBits) planes;                  // accessible planes (missing planes are read-only for "DEPTH_STENCIL_ATTACHMENT" if "layout" is not provided, i.e. "UNDEFINED")
     Nri(ComponentMapping) components;
+
+    // Overrides the expected access-time layout without transitioning the texture. May be any layout compatible with the view and texture usage, including fully or partially read-only depth-stencil layouts
+    NriOptional Nri(Layout) layout;         // auto-derived from the "type" and "planes" if "UNDEFINED"
 };
 
 NriStruct(BufferViewDesc) {
