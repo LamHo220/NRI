@@ -96,6 +96,7 @@ static const Nri(Dim_t) NriConstant(REMAINING) = 0;     // only for "mipNum" and
 
 // "AdapterDesc::supportedGraphicsAPIs" is a mask of supported graphics APIs
 NriBits(GraphicsAPI, uint8_t,
+    ALL     = 0,         // lazy default for "desiredGraphicsAPIs" argument in "nriEnumerateAdapters"
     NONE    = NriBit(0), // Supports everything, does nothing, returns dummy non-NULL objects and ~0-filled descs, available if "NRI_ENABLE_NONE_SUPPORT = ON" in CMake
     D3D11   = NriBit(1), // Direct3D 11 (feature set 11.1), available if "NRI_ENABLE_D3D11_SUPPORT = ON" in CMake (https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm)
     D3D12   = NriBit(2), // Direct3D 12 (D3D12_SDK_VERSION 4 or 619+), available if "NRI_ENABLE_D3D12_SUPPORT = ON" in CMake (https://microsoft.github.io/DirectX-Specs/)
@@ -734,7 +735,8 @@ NriBits(TextureUsageBits, uint16_t,                 // Min compatible access:   
     HOST_TRANSFER                       = NriBit(6),    // HOST_READ/HOST_WRITE                     Synchronous copy between texture and host memory
     VIDEO_DECODE                        = NriBit(7),    // VIDEO_DECODE                             Video decode output / DPB picture
     VIDEO_ENCODE                        = NriBit(8),    // VIDEO_ENCODE                             Video encode input / DPB picture
-    VIDEO_REFERENCE_ONLY                = NriBit(9)     // VIDEO_*                                  Video DPB/reference-only allocation
+    VIDEO_REFERENCE_ONLY                = NriBit(9),    // VIDEO_*                                  Video DPB/reference-only allocation
+    VIDEO_OUTPUT_ONLY                   = NriBit(10)    // VIDEO_*                                  Video decode output / encode input never used as a DPB picture (required if "decodeDpbAndOutputCoincide" is false; encode: pair with "VIDEO_REFERENCE_ONLY" DPB textures, VK may not support the combined usage)
 );
 
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkBufferUsageFlagBits.html
@@ -775,6 +777,7 @@ NriStruct(TextureDesc) {
     NriOptional Nri(Sample_t) sampleNum;
     NriOptional Nri(SharingMode) sharingMode;
     NriOptional Nri(VideoCodec) videoCodec;             // VK: required for video textures
+    NriOptional bool videoAV1FilmGrain;                 // VK: AV1 decode textures of sessions with "VideoSessionDesc::av1FilmGrain"
     NriOptional Nri(ClearValue) optimizedClearValue;    // D3D12: not needed on desktop, since any HW can track many clear values
 };
 

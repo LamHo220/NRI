@@ -31,6 +31,14 @@ struct VideoSessionD3D12 final : public DebugNameBase {
         return m_AV1FeatureFlags;
     }
 
+    inline uint32_t GetAV1RequiredFeatureFlags() const {
+        return m_AV1RequiredFeatureFlags;
+    }
+
+    inline uint32_t GetEncodeSupportFlags(VideoEncodeRateControlMode rateControlMode) const {
+        return m_EncodeSupportFlags[(size_t)rateControlMode];
+    }
+
     inline uint32_t GetRateControlModes() const {
         return m_RateControlModes;
     }
@@ -63,6 +71,8 @@ struct VideoSessionD3D12 final : public DebugNameBase {
 
         return static_cast<ID3D12VideoEncoderHeapBest*>(m_Heap.GetInterface());
     }
+
+    D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAGS UpdateEncodeGop(const D3D12_VIDEO_ENCODER_SEQUENCE_GOP_STRUCTURE& gop, VideoEncodeRateControlMode rateControlMode);
 #endif
 
     //================================================================================================================
@@ -79,6 +89,7 @@ struct VideoSessionD3D12 final : public DebugNameBase {
     //================================================================================================================
 
     Result Create(const VideoSessionDesc& videoSessionDesc);
+    void Reset();
 
 private:
     DeviceD3D12& m_Device;
@@ -86,8 +97,15 @@ private:
     ComPtr<ID3D12Pageable> m_Heap;
     VideoSessionDesc m_Desc = {};
     uint32_t m_AV1FeatureFlags = 0;
+    uint32_t m_AV1RequiredFeatureFlags = 0;
+    std::array<uint32_t, (size_t)VideoEncodeRateControlMode::MAX_NUM> m_EncodeSupportFlags = {}; // "D3D12_VIDEO_ENCODER_SUPPORT_FLAGS" per rate-control mode
     uint32_t m_RateControlModes = 0;
     bool m_BFrameSupported = false;
+#if NRI_ENABLE_AGILITY_SDK_SUPPORT
+    std::array<uint32_t, 5> m_EncodeGop = {}; // GOP length, P period, POC type, frame_num width, POC width (no native struct padding)
+    bool m_EncodeGopInitialized = false;
+    bool m_EncodeGopChangePending = false;
+#endif
 };
 
 } // namespace nri

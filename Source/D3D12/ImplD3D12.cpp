@@ -1205,7 +1205,8 @@ static void NRI_CALL DestroyVideoSession(VideoSession* videoSession) {
     Destroy((VideoSessionD3D12*)videoSession);
 }
 
-static void NRI_CALL ResetVideoSession(VideoSession&) {
+static void NRI_CALL ResetVideoSession(VideoSession& videoSession) {
+    ((VideoSessionD3D12&)videoSession).Reset();
 }
 
 static Result NRI_CALL CreateVideoSessionParameters(Device& device, const VideoSessionParametersDesc& videoSessionParametersDesc, VideoSessionParameters*& videoSessionParameters) {
@@ -1271,8 +1272,8 @@ static Result NRI_CALL GetVideoEncodeFeedback(VideoSession&, Buffer& resolvedMet
     return GetVideoEncodeFeedback((BufferD3D12&)resolvedMetadataReadback, resolvedMetadataOffset, feedback);
 }
 
-static Result NRI_CALL GetVideoAV1EncodeDecodeInfo(VideoSession&, Buffer& resolvedMetadataReadback, uint64_t resolvedMetadataOffset, const VideoAV1EncodeDecodeInfoDesc& desc, VideoAV1EncodeDecodeInfo& info) {
-    return GetVideoAV1EncodeDecodeInfo((BufferD3D12&)resolvedMetadataReadback, resolvedMetadataOffset, desc, info);
+static Result NRI_CALL GetVideoAV1EncodeDecodeInfo(VideoSession& videoSession, Buffer& resolvedMetadataReadback, uint64_t resolvedMetadataOffset, const VideoAV1EncodeDecodeInfoDesc& desc, VideoAV1EncodeDecodeInfo& info) {
+    return GetVideoAV1EncodeDecodeInfo((VideoSessionD3D12&)videoSession, (BufferD3D12&)resolvedMetadataReadback, resolvedMetadataOffset, desc, info);
 }
 
 Result DeviceD3D12::FillFunctionTable(VideoInterface& table) const {
