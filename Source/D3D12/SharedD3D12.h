@@ -41,6 +41,7 @@ struct D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY {
 #endif
 
 #include "SharedExternal.h"
+#include "D3D12Compat.h"
 #include "VideoHelpersD3D12.h"
 
 namespace nri {

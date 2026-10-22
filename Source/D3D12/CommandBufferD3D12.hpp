@@ -463,7 +463,7 @@ static inline void FillResolveBarrier(bool isSource, DescriptorD3D12& descriptor
 
     textureBarrier = {};
     AccessLayoutStage state = {isSource ? AccessBits::RESOLVE_ATTACHMENT_SOURCE : AccessBits::RESOLVE_ATTACHMENT_DESTINATION, viewDesc.layout, StageBits::ALL};
-    state = GetResolveAttachmentState(state, descriptor.GetFormat(), planeBits, !(descriptor.GetResource()->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE));
+    state = GetResolveAttachmentState(state, descriptor.GetFormat(), planeBits, !(GetNativeDesc(descriptor.GetResource()).Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE));
     textureBarrier.SyncBefore = GetBarrierSyncFlags(state.stages, state.access);
     textureBarrier.SyncAfter = D3D12_BARRIER_SYNC_RESOLVE;
     textureBarrier.AccessBefore = GetBarrierAccessFlags(state.access);
@@ -485,7 +485,7 @@ static inline void FillLegacyResolveBarrier(bool isSource, DescriptorD3D12& desc
     resourceBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     resourceBarrier.Transition.pResource = descriptor.GetResource();
     AccessLayoutStage state = {isSource ? AccessBits::RESOLVE_ATTACHMENT_SOURCE : AccessBits::RESOLVE_ATTACHMENT_DESTINATION, descriptor.GetTexViewDesc().layout, StageBits::ALL};
-    state = GetResolveAttachmentState(state, descriptor.GetFormat(), planeBits, !(descriptor.GetResource()->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE));
+    state = GetResolveAttachmentState(state, descriptor.GetFormat(), planeBits, !(GetNativeDesc(descriptor.GetResource()).Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE));
     resourceBarrier.Transition.StateBefore = GetResourceStates(state.access, D3D12_COMMAND_LIST_TYPE_DIRECT);
     resourceBarrier.Transition.StateAfter = isSource ? D3D12_RESOURCE_STATE_RESOLVE_SOURCE : D3D12_RESOURCE_STATE_RESOLVE_DEST;
     resourceBarrier.Transition.Subresource = subresource;
@@ -2171,20 +2171,10 @@ NRI_INLINE void CommandBufferD3D12::EndRendering() {
 #endif
         {
             const TexViewDesc& srcDesc = resolveSrc->GetTexViewDesc();
-#if defined(_MVC_VER) || !defined(_WIN32)
-            D3D12_RESOURCE_DESC srcResourceDesc = resolveSrc->GetResource()->GetDesc();
-#else
-            D3D12_RESOURCE_DESC srcResourceDesc;
-            resolveSrc->GetResource()->GetDesc(&srcResourceDesc);
-#endif
+            D3D12_RESOURCE_DESC srcResourceDesc = GetNativeDesc(resolveSrc->GetResource());
 
             const TexViewDesc& dstDesc = resolveDst->GetTexViewDesc();
-#if defined(_MVC_VER) || !defined(_WIN32)
-            D3D12_RESOURCE_DESC dstResourceDesc = resolveDst->GetResource()->GetDesc();
-#else
-            D3D12_RESOURCE_DESC dstResourceDesc;
-            resolveDst->GetResource()->GetDesc(&dstResourceDesc);
-#endif
+            D3D12_RESOURCE_DESC dstResourceDesc = GetNativeDesc(resolveDst->GetResource());
 
             for (uint32_t layer = 0; layer < srcDesc.layerNum; layer++) {
                 uint32_t srcSubresource = GetSubresourceIndex(srcDesc.layerOffset + layer, srcResourceDesc.DepthOrArraySize, srcDesc.mipOffset, srcResourceDesc.MipLevels, planeBits);
@@ -2225,22 +2215,12 @@ NRI_INLINE void CommandBufferD3D12::EndRendering() {
             const DxgiFormat& format = GetDxgiFormat(attachmentDesc->resolveDst->GetFormat());
 
             ID3D12Resource* srcResource = attachmentDesc->attachment->GetResource();
-#if defined(_MVC_VER) || !defined(_WIN32)
-            D3D12_RESOURCE_DESC srcResourceDesc = srcResource->GetDesc();
-#else
-            D3D12_RESOURCE_DESC srcResourceDesc;
-            srcResource->GetDesc(&srcResourceDesc);
-#endif
+            D3D12_RESOURCE_DESC srcResourceDesc = GetNativeDesc(srcResource);
             const TexViewDesc& srcDesc = attachmentDesc->attachment->GetTexViewDesc();
             uint32_t srcSubresource = GetSubresourceIndex(srcDesc.layerOffset, srcResourceDesc.DepthOrArraySize, srcDesc.mipOffset, srcResourceDesc.MipLevels, planeBits);
 
             ID3D12Resource* dstResource = attachmentDesc->resolveDst->GetResource();
-#if defined(_MVC_VER) || !defined(_WIN32)
-            D3D12_RESOURCE_DESC dstResourceDesc = dstResource->GetDesc();
-#else
-            D3D12_RESOURCE_DESC dstResourceDesc;
-            dstResource->GetDesc(&dstResourceDesc);
-#endif
+            D3D12_RESOURCE_DESC dstResourceDesc = GetNativeDesc(dstResource);
             const TexViewDesc& dstDesc = attachmentDesc->resolveDst->GetTexViewDesc();
             uint32_t dstSubresource = GetSubresourceIndex(dstDesc.layerOffset, dstResourceDesc.DepthOrArraySize, dstDesc.mipOffset, dstResourceDesc.MipLevels, planeBits);
 
@@ -2450,12 +2430,7 @@ NRI_INLINE void CommandBufferD3D12::CopyTexture(Texture& dstTexture, const Textu
 NRI_INLINE void CommandBufferD3D12::ZeroBuffer(Buffer& buffer, uint64_t offset, uint64_t size) {
     const BufferD3D12& dst = (BufferD3D12&)buffer;
     ID3D12Resource* zeroBuffer = m_Device.GetZeroBuffer();
-#if defined(_MVC_VER) || !defined(_WIN32)
-    D3D12_RESOURCE_DESC zeroBufferDesc = zeroBuffer->GetDesc();
-#else
-    D3D12_RESOURCE_DESC zeroBufferDesc;
-    zeroBuffer->GetDesc(&zeroBufferDesc);
-#endif
+    D3D12_RESOURCE_DESC zeroBufferDesc = GetNativeDesc(zeroBuffer);
 
     if (size == WHOLE_SIZE)
         size = dst.GetDesc().size;
@@ -2733,7 +2708,7 @@ NRI_INLINE void CommandBufferD3D12::Barrier(const BarrierDesc& barrierDesc) {
                 out.Flags = in.before.layout == Layout::UNDEFINED ? D3D12_TEXTURE_BARRIER_FLAG_DISCARD : D3D12_TEXTURE_BARRIER_FLAG_NONE; // TODO: verify that it works
 
                 bool attachmentResolve = (in.before.access | in.after.access) & RESOLVE_ATTACHMENT_ACCESS;
-                bool shaderResource = attachmentResolve && !(((ID3D12Resource*)texture)->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+                bool shaderResource = attachmentResolve && !(GetNativeDesc((ID3D12Resource*)texture).Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
                 bool splitPlanes = attachmentResolve && (formatProps.isDepth || formatProps.isStencil);
                 uint32_t planeNum = splitPlanes ? out.Subresources.NumPlanes : 1;
                 for (uint32_t plane = 0; plane < planeNum; plane++) {
@@ -2835,7 +2810,7 @@ NRI_INLINE void CommandBufferD3D12::Barrier(const BarrierDesc& barrierDesc) {
 
             bool attachmentResolve = (barrier.before.access | barrier.after.access) & RESOLVE_ATTACHMENT_ACCESS;
             if (attachmentResolve) {
-                bool shaderResource = !(((ID3D12Resource*)texture)->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+                bool shaderResource = !(GetNativeDesc((ID3D12Resource*)texture).Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
                 const FormatProps& formatProps = GetFormatProps(textureDesc.format);
                 const PlaneBits planes[] = {formatProps.isDepth ? PlaneBits::DEPTH : PlaneBits::COLOR, PlaneBits::STENCIL};
                 uint32_t planeNum = formatProps.isStencil ? 2 : 1;

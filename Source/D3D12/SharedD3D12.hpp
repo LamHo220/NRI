@@ -361,13 +361,7 @@ D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE nri::GetCopyMode(CopyMode copy
 }
 
 uint64_t nri::GetMemorySizeD3D12(const MemoryD3D12Desc& memoryD3D12Desc) {
-#if defined(_MVC_VER) || !defined(_WIN32)
-    return memoryD3D12Desc.d3d12Heap->GetDesc().SizeInBytes;
-#else
-    D3D12_HEAP_DESC desc;
-    memoryD3D12Desc.d3d12Heap->GetDesc(&desc);
-    return desc.SizeInBytes;
-#endif
+    return GetNativeDesc(memoryD3D12Desc.d3d12Heap).SizeInBytes;
 }
 
 D3D12_RESIDENCY_PRIORITY nri::ConvertPriority(float priority) {
@@ -411,12 +405,7 @@ bool nri::GetTextureDesc(const TextureD3D12Desc& textureD3D12Desc, TextureDesc& 
     if (!resource)
         return false;
 
-#if defined(_MVC_VER) || !defined(_WIN32)
-    D3D12_RESOURCE_DESC desc = resource->GetDesc();
-#else
-    D3D12_RESOURCE_DESC desc;
-    resource->GetDesc(&desc);
-#endif
+    D3D12_RESOURCE_DESC desc = GetNativeDesc(resource);
     if (desc.Dimension < D3D12_RESOURCE_DIMENSION_TEXTURE1D)
         return false;
 
@@ -456,12 +445,7 @@ bool nri::GetBufferDesc(const BufferD3D12Desc& bufferD3D12Desc, BufferDesc& buff
     if (!resource)
         return false;
 
-#if defined(_MVC_VER) || !defined(_WIN32)
-    D3D12_RESOURCE_DESC desc = resource->GetDesc();
-#else
-    D3D12_RESOURCE_DESC desc;
-    resource->GetDesc(&desc);
-#endif
+    D3D12_RESOURCE_DESC desc = GetNativeDesc(resource);
     if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
         return false;
 

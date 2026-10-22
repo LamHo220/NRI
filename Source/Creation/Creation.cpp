@@ -32,6 +32,10 @@
 
 #include "SharedExternal.h"
 
+#if NRI_ENABLE_D3D12_SUPPORT
+#    include "D3D12Compat.h"
+#endif
+
 #define ADAPTER_MAX_NUM 32u
 
 using namespace nri;
@@ -1130,12 +1134,7 @@ NRI_API Result NRI_CALL nriCreateDeviceFromD3D12Device(const DeviceCreationD3D12
     if (!deviceCreationD3D12Desc.d3d12Device)
         return Result::INVALID_ARGUMENT;
 
-#if defined(_MVC_VER) || !defined(_WIN32)
-    LUID luid = deviceCreationD3D12Desc.d3d12Device->GetAdapterLuid();
-#else
-    LUID luid;
-    deviceCreationD3D12Desc.d3d12Device->GetAdapterLuid(&luid);
-#endif
+    LUID luid = GetAdapterLuid(deviceCreationD3D12Desc.d3d12Device);
     uint32_t unused = 0;
     UpdateAdaptersD3D(&adapterDesc, unused, &luid);
 
