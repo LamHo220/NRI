@@ -595,8 +595,12 @@ static inline Dim_t GetDimension(GraphicsAPI api, const TextureDesc& textureDesc
     dim = (Dim_t)std::max(dim >> mip, 1);
 
     // TODO: VK doesn't require manual alignment, but probably we should use it here and during texture creation
-    if (api != GraphicsAPI::VK)
-        dim = Align(dim, dimensionIndex < 2 ? GetFormatProps(textureDesc.format).blockWidth : 1);
+    if (api != GraphicsAPI::VK && dimensionIndex < 2) {
+        // Not "Align", because ASTC block dimensions can be non-power-of-2
+        const FormatProps& formatProps = GetFormatProps(textureDesc.format);
+        uint32_t blockDim = dimensionIndex == 0 ? formatProps.blockWidth : formatProps.blockHeight;
+        dim = (Dim_t)((dim + blockDim - 1) / blockDim * blockDim);
+    }
 
     return dim;
 }
@@ -626,6 +630,22 @@ constexpr std::array<Layout, (size_t)TextureView::MAX_NUM> g_TextureViewLayouts 
     Layout::SHADING_RATE_ATTACHMENT,  // SHADING_RATE_ATTACHMENT
 };
 NRI_VALIDATE_ARRAY(g_TextureViewLayouts);
+
+static inline TextureViewDesc FixTextureViewDesc(const TextureViewDesc& textureViewDesc, const TextureDesc& textureDesc) {
+    TextureViewDesc desc = textureViewDesc;
+    desc.format = desc.format == Format::UNKNOWN ? textureDesc.format : desc.format;
+
+    return desc;
+}
+
+static inline bool HasUpdateAfterSetRanges(const DescriptorSetDesc& descriptorSetDesc) {
+    for (uint32_t i = 0; i < descriptorSetDesc.rangeNum; i++) {
+        if (descriptorSetDesc.ranges[i].flags & DescriptorRangeBits::ALLOW_UPDATE_AFTER_SET)
+            return true;
+    }
+
+    return false;
+}
 
 static inline Layout GetTextureViewLayout(const TextureViewDesc& desc) {
     if (desc.layout != Layout::UNDEFINED)
