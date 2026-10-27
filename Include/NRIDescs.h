@@ -80,6 +80,9 @@ static const uint32_t NriConstant(ALL) = 0;             // only for "sampleMask"
 static const Nri(Dim_t) NriConstant(WHOLE_SIZE) = 0;    // only for "Dim_t" and "size"
 static const Nri(Dim_t) NriConstant(REMAINING) = 0;     // only for "mipNum" and "layerNum"
 
+// Transfers ownership of a shared resource "to" or "from" an external user
+static NriPtr(Queue) const NriConstant(EXTERNAL_QUEUE) = (NriPtr(Queue))1;
+
 // Readability
 #define NriOptional // i.e. can be 0 (keep an eye on comments)
 #define NriOut      // highlights an output argument
@@ -664,6 +667,10 @@ NriStruct(BufferBarrierDesc) {
     NriPtr(Buffer) buffer;  // use "GetAccelerationStructureBuffer" and "GetMicromapBuffer" for related barriers
     Nri(AccessStage) before;
     Nri(AccessStage) after;
+
+    // Only for ownership transfers of shared buffers to or from an external user: use "EXTERNAL_QUEUE" and the local queue executing the barrier
+    NriOptional NriPtr(Queue) srcQueue;
+    NriOptional NriPtr(Queue) dstQueue;
 };
 
 NriStruct(TextureBarrierDesc) {
@@ -676,9 +683,8 @@ NriStruct(TextureBarrierDesc) {
     Nri(Dim_t) layerNum;    // can be "REMAINING"
     Nri(PlaneBits) planes;
 
-    // Source and destination queues for the "before" and "after" sides of a cross-queue texture hand-off. Specify both queues regardless of sharing mode.
-    // Queue ownership transfer is potentially needed only for "SharingMode::EXCLUSIVE" textures
-    // https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#synchronization-queue-transfers
+    // Specify both queues for a cross-queue hand-off; only "SharingMode::EXCLUSIVE" may need local ownership transfers.
+    // Transfers to or from an external user apply to any sharing mode: use "EXTERNAL_QUEUE" and the local queue executing the barrier
     NriOptional NriPtr(Queue) srcQueue;
     NriOptional NriPtr(Queue) dstQueue;
 };
@@ -708,18 +714,14 @@ NriEnum(TextureType, uint8_t,
     TEXTURE_3D  // arrays are unsupported
 );
 
-// NRI tries to ease your life and avoid using "queue ownership transfers" (see "TextureBarrierDesc").
-// In most of cases "SharingMode" can be ignored. Where is it needed?
-// - VK: use "EXCLUSIVE" for attachments participating into multi-queue activities to preserve DCC (Delta Color Compression) on some HW
-// - D3D12: use "SIMULTANEOUS" to concurrently use a texture as a "SHADER_RESOURCE" (or "SHADER_RESOURCE_STORAGE") and as a "COPY_DESTINATION" for non overlapping texture regions
-// https://docs.vulkan.org/refpages/latest/refpages/source/VkSharingMode.html
+// Texture sharing between local queues (see "TextureBarrierDesc")
 NriEnum(SharingMode, uint8_t,
-    CONCURRENT,     // VK: lazy default to avoid dealing with "queue ownership transfers", auto-optimized to "EXCLUSIVE" if all queues have the same type
-    EXCLUSIVE,      // VK: may be used for attachments to preserve DCC on some HW in the cost of making a "queue ownership transfer"
+    CONCURRENT,     // default; no ownership transfers between local queues
+    EXCLUSIVE,      // VK: may preserve attachment compression; may need local ownership transfers
 
     // https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html#single-queue-simultaneous-access
     // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resource_flags
-    SIMULTANEOUS    // D3D12: strengthened variant of "CONCURRENT", allowing simultaneous multiple readers and one writer for a texture (requires "Layout::GENERAL")
+    SIMULTANEOUS    // D3D12: concurrent reads and one write to non-overlapping regions (requires "Layout::GENERAL")
 );
 
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkImageUsageFlagBits.html
@@ -779,9 +781,10 @@ NriStruct(TextureDesc) {
     NriOptional Nri(VideoCodec) videoCodec;             // VK: required for video textures
     NriOptional bool videoAV1FilmGrain;                 // VK: AV1 decode textures of sessions with "VideoSessionDesc::av1FilmGrain"
     NriOptional Nri(ClearValue) optimizedClearValue;    // D3D12: not needed on desktop, since any HW can track many clear values
+    NriOptional bool shared;                            // "GetTextureSharedHandle": requires "CreateCommittedTexture" in "DEVICE" memory and "features.sharedResources"
 };
 
-// - VK: buffers are always created with sharing mode "CONCURRENT" to match D3D12 spec
+// - Buffers can move between local queues without ownership transfers
 // - D3D11: "structureStride != 0" locks this buffer to a single "STRUCTURED" layout, unless "byteAddress" is set to "true"
 // - D3D11: "byteAddress = true" allows to create multiple "STRUCTURED" views for a single resource by treating a "STRUCTURED" view as "BYTE_ADDRESS" (spec violation)
 // - WGPU: typed buffer views are unsupported (i.e. "structureStride = 0" and "byteAddress = false")
@@ -790,6 +793,7 @@ NriStruct(BufferDesc) {
     uint32_t structureStride;   // enable "STRUCTURED" views
     Nri(BufferUsageBits) usage;
     bool byteAddress;           // enable "BYTE_ADDRESS" views
+    NriOptional bool shared;    // "GetBufferSharedHandle": requires "CreateCommittedBuffer" in "DEVICE" memory and "features.sharedResources"
 };
 
 #pragma endregion
@@ -852,6 +856,32 @@ NriStruct(BindTextureMemoryDesc) {
     NriPtr(Texture) texture;
     NriPtr(Memory) memory;
     uint64_t offset; // in memory
+};
+
+#pragma endregion
+
+//============================================================================================================================================================================================
+#pragma region [ Shared handles ]
+//============================================================================================================================================================================================
+
+// Shared handles export buffers, textures and fences to an external user:
+// - To use imported objects in NRI, import natively first, then use the wrapper extensions
+// - Resource exports are dedicated allocations
+// - CUDA: VK timeline fences require "TimelineSemaphoreWin32/Fd" imports, binary semaphores use "OpaqueWin32/Fd"
+// - After an FD import takes ownership, clear "SharedHandle" instead of destroying it
+// - VK: unsupported resource/semaphore export configurations return "UNSUPPORTED"
+NriEnum(SharedHandleType, uint8_t,
+    NONE,
+    OPAQUE_WIN32,       // VK opaque NT handle
+    OPAQUE_FD,          // VK opaque file descriptor
+    D3D12_RESOURCE,     // D3D12 resource NT handle
+    D3D12_FENCE         // D3D12 fence NT handle
+);
+
+NriStruct(SharedHandle) {
+    void* handle;               // caller-owned NT handle or FD cast to a pointer (FD 0 is valid); see "DestroySharedHandle"
+    Nri(SharedHandleType) type;
+    uint64_t size;              // allocation size in bytes for import (0 for fences)
 };
 
 #pragma endregion
@@ -1861,6 +1891,11 @@ NriStruct(ReadbackTextureToHostMemoryDesc) {
     NriOptional uint32_t dstSlicePitch; // if slices are not tightly packed
 };
 
+NriStruct(FenceDesc) {
+    uint64_t initialValue;      // "SWAPCHAIN_SEMAPHORE" creates a binary semaphore (see "NRISwapChain.h")
+    NriOptional bool shared;    // "GetFenceSharedHandle": requires "features.sharedFences"; D3D12: unsupported for binary semaphores
+};
+
 // Work submission
 NriStruct(FenceSubmitDesc) {
     NriPtr(Fence) fence;
@@ -2257,6 +2292,10 @@ NriStruct(DeviceDesc) {
         bool flexibleMultiview;                                   // see "Multiview::FLEXIBLE"
         bool layerBasedMultiview;                                 // see "Multiview::LAYRED_BASED"
         bool viewportBasedMultiview;                              // see "Multiview::VIEWPORT_BASED"
+
+        // Shared handles
+        bool sharedResources;                                     // see "BufferDesc::shared" and "TextureDesc::shared"
+        bool sharedFences;                                        // see "FenceDesc::shared"
 
         // Texture compression
         bool textureCompressionBC;                                // all "BC" texture formats are supported

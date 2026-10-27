@@ -2,6 +2,13 @@
 
 #include <math.h>
 
+static inline uint32_t GetQueueFamilyIndex(const Queue* queue, bool isConcurrent) {
+    if (queue == EXTERNAL_QUEUE)
+        return VK_QUEUE_FAMILY_EXTERNAL;
+
+    return (queue && !isConcurrent) ? ((const QueueVK*)queue)->GetFamilyIndex() : VK_QUEUE_FAMILY_IGNORED;
+}
+
 static inline VkPipelineBindPoint GetPipelineBindPoint(BindPoint bindPoint) {
     switch (bindPoint) {
         case BindPoint::COMPUTE:
@@ -457,10 +464,17 @@ CommandBufferVK::~CommandBufferVK() {
     }
 }
 
-void CommandBufferVK::Create(VkCommandPool commandPool, VkCommandBuffer commandBuffer, QueueType type) {
+Result CommandBufferVK::Create(VkCommandPool commandPool, QueueType type) {
+    const VkCommandBufferAllocateInfo info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr, commandPool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+
+    const auto& vk = m_Device.GetDispatchTable();
+    VkResult vkResult = vk.AllocateCommandBuffers(m_Device, &info, &m_Handle);
+    NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "vkAllocateCommandBuffers");
+
     m_CommandPool = commandPool;
-    m_Handle = commandBuffer;
     m_Type = type;
+
+    return Result::SUCCESS;
 }
 
 Result CommandBufferVK::Create(const CommandBufferVKDesc& commandBufferVKDesc) {
@@ -2642,6 +2656,7 @@ NRI_INLINE void CommandBufferVK::Barrier(const BarrierDesc& barrierDesc) {
     for (uint32_t i = 0; i < barrierDesc.bufferNum; i++) {
         const BufferBarrierDesc& in = barrierDesc.buffers[i];
         const BufferVK& bufferVK = *(const BufferVK*)in.buffer;
+        const bool isConcurrent = bufferVK.IsConcurrent();
 
         VkBufferMemoryBarrier2& out = bufferBarriers[i];
         out = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
@@ -2649,8 +2664,8 @@ NRI_INLINE void CommandBufferVK::Barrier(const BarrierDesc& barrierDesc) {
         out.srcAccessMask = GetAccessFlags(in.before.access);
         out.dstStageMask = GetPipelineStageFlags(in.after.stages);
         out.dstAccessMask = GetAccessFlags(in.after.access);
-        out.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; // "VK_SHARING_MODE_CONCURRENT" is intentionally used for buffers to match D3D12 spec
-        out.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        out.srcQueueFamilyIndex = GetQueueFamilyIndex(in.srcQueue, isConcurrent);
+        out.dstQueueFamilyIndex = GetQueueFamilyIndex(in.dstQueue, isConcurrent);
         out.buffer = bufferVK.GetHandle();
         out.offset = 0;
         out.size = VK_WHOLE_SIZE;
@@ -2662,8 +2677,6 @@ NRI_INLINE void CommandBufferVK::Barrier(const BarrierDesc& barrierDesc) {
     for (uint32_t i = 0; i < barrierDesc.textureNum; i++) {
         const TextureBarrierDesc& in = barrierDesc.textures[i];
         const TextureVK& textureVK = *(TextureVK*)in.texture;
-        const QueueVK* srcQueue = (QueueVK*)in.srcQueue;
-        const QueueVK* dstQueue = (QueueVK*)in.dstQueue;
         const bool isConcurrent = textureVK.IsConcurrent();
 
         VkImageAspectFlags aspectFlags = GetImageAspectFlags(in.planes, textureVK.GetDesc().format);
@@ -2676,8 +2689,8 @@ NRI_INLINE void CommandBufferVK::Barrier(const BarrierDesc& barrierDesc) {
         out.dstAccessMask = GetAccessFlags(in.after.access);
         out.oldLayout = GetImageLayout(in.before.layout);
         out.newLayout = GetImageLayout(in.after.layout);
-        out.srcQueueFamilyIndex = (in.srcQueue && !isConcurrent) ? srcQueue->GetFamilyIndex() : VK_QUEUE_FAMILY_IGNORED;
-        out.dstQueueFamilyIndex = (in.dstQueue && !isConcurrent) ? dstQueue->GetFamilyIndex() : VK_QUEUE_FAMILY_IGNORED;
+        out.srcQueueFamilyIndex = GetQueueFamilyIndex(in.srcQueue, isConcurrent);
+        out.dstQueueFamilyIndex = GetQueueFamilyIndex(in.dstQueue, isConcurrent);
         out.image = textureVK.GetHandle();
         out.subresourceRange = {
             aspectFlags,

@@ -200,14 +200,29 @@ DeviceVal::~DeviceVal() {
     ((DeviceBase*)&m_Impl)->Destruct();
 }
 
-bool DeviceVal::Create() {
+template <typename Implementation, typename Interface, typename Backend, typename Deleter, typename... Args>
+Result DeviceVal::WrapImplementation(Interface*& entity, Backend* impl, Deleter destroy, Args&&... args) {
+    entity = nullptr;
+    Implementation* wrapper = Allocate<Implementation>(GetAllocationCallbacks(), *this, impl, std::forward<Args>(args)...);
+    if (!wrapper) {
+        destroy(impl);
+
+        return Result::OUT_OF_MEMORY;
+    }
+
+    entity = (Interface*)wrapper;
+
+    return Result::SUCCESS;
+}
+
+Result DeviceVal::Create() {
     const DeviceBase& deviceBaseImpl = (DeviceBase&)m_Impl;
 
     Result result = deviceBaseImpl.FillFunctionTable(m_iCoreImpl);
-    NRI_RETURN_ON_FAILURE(this, result == Result::SUCCESS, false, "Failed to get 'CoreInterface' interface");
+    NRI_RETURN_ON_FAILURE(this, result == Result::SUCCESS, result, "Failed to get 'CoreInterface' interface");
 
     result = deviceBaseImpl.FillFunctionTable(m_iHelperImpl);
-    NRI_RETURN_ON_FAILURE(this, result == Result::SUCCESS, false, "Failed to get 'HelperInterface' interface");
+    NRI_RETURN_ON_FAILURE(this, result == Result::SUCCESS, result, "Failed to get 'HelperInterface' interface");
 
     m_IsExtSupported.descriptorHeap = deviceBaseImpl.FillFunctionTable(m_iDescriptorHeapImpl) == Result::SUCCESS;
     m_IsExtSupported.lowLatency = deviceBaseImpl.FillFunctionTable(m_iLowLatencyImpl) == Result::SUCCESS;
@@ -222,7 +237,7 @@ bool DeviceVal::Create() {
 
     m_Desc = GetDesc();
 
-    return FillFunctionTable(m_iCore) == Result::SUCCESS;
+    return FillFunctionTable(m_iCore);
 }
 
 void DeviceVal::RegisterMemoryType(MemoryType memoryType, MemoryLocation memoryLocation) {
@@ -270,8 +285,12 @@ NRI_INLINE Result DeviceVal::CreateSwapChain(const SwapChainDesc& swapChainDesc,
     Result result = m_iSwapChainImpl.CreateSwapChain(m_Impl, swapChainDescImpl, swapChainImpl);
 
     swapChain = nullptr;
-    if (result == Result::SUCCESS)
-        swapChain = (SwapChain*)Allocate<SwapChainVal>(GetAllocationCallbacks(), *this, swapChainImpl, swapChainDesc);
+    if (result == Result::SUCCESS) {
+        SwapChainVal* impl = Allocate<SwapChainVal>(GetAllocationCallbacks(), *this, swapChainImpl, swapChainDesc);
+        result = CreateImplementation(GetAllocationCallbacks(), swapChain, impl);
+        if (result != Result::SUCCESS)
+            m_iSwapChainImpl.DestroySwapChain(swapChainImpl);
+    }
 
     return result;
 }
@@ -297,6 +316,8 @@ NRI_INLINE Result DeviceVal::GetQueue(QueueType queueType, uint32_t queueIndex, 
             queueVal = Allocate<QueueVal>(GetAllocationCallbacks(), *this, queueImpl, queueType);
 
         queue = (Queue*)queueVal;
+        if (!queue)
+            result = Result::OUT_OF_MEMORY;
     }
 
     return result;
@@ -314,7 +335,7 @@ NRI_INLINE Result DeviceVal::CreateCommandAllocator(const Queue& queue, CommandA
 
     commandAllocator = nullptr;
     if (result == Result::SUCCESS)
-        commandAllocator = (CommandAllocator*)Allocate<CommandAllocatorVal>(GetAllocationCallbacks(), *this, commandAllocatorImpl, queueVal.GetType());
+        result = WrapImplementation<CommandAllocatorVal>(commandAllocator, commandAllocatorImpl, m_iCoreImpl.DestroyCommandAllocator, queueVal.GetType());
 
     return result;
 }
@@ -327,12 +348,13 @@ NRI_INLINE Result DeviceVal::CreateDescriptorPool(const DescriptorPoolDesc& desc
 
     descriptorPool = nullptr;
     if (result == Result::SUCCESS)
-        descriptorPool = (DescriptorPool*)Allocate<DescriptorPoolVal>(GetAllocationCallbacks(), *this, descriptorPoolImpl, descriptorPoolDesc);
+        result = WrapImplementation<DescriptorPoolVal>(descriptorPool, descriptorPoolImpl, m_iCoreImpl.DestroyDescriptorPool, descriptorPoolDesc);
 
     return result;
 }
 
 NRI_INLINE Result DeviceVal::CreateBuffer(const BufferDesc& bufferDesc, Buffer*& buffer) {
+    NRI_RETURN_ON_FAILURE(this, !bufferDesc.shared, Result::INVALID_ARGUMENT, "'shared' buffers must be created with 'CreateCommittedBuffer'");
     NRI_RETURN_ON_FAILURE(this, bufferDesc.size != 0, Result::INVALID_ARGUMENT, "'size' is 0");
 
     Buffer* bufferImpl = nullptr;
@@ -340,12 +362,13 @@ NRI_INLINE Result DeviceVal::CreateBuffer(const BufferDesc& bufferDesc, Buffer*&
 
     buffer = nullptr;
     if (result == Result::SUCCESS)
-        buffer = (Buffer*)Allocate<BufferVal>(GetAllocationCallbacks(), *this, bufferImpl, false);
+        result = WrapImplementation<BufferVal>(buffer, bufferImpl, m_iCoreImpl.DestroyBuffer, false);
 
     return result;
 }
 
 NRI_INLINE Result DeviceVal::CreateTexture(const TextureDesc& textureDesc, Texture*& texture) {
+    NRI_RETURN_ON_FAILURE(this, !textureDesc.shared, Result::INVALID_ARGUMENT, "'shared' textures must be created with 'CreateCommittedTexture'");
     NRI_RETURN_ON_FAILURE(this, textureDesc.type < TextureType::MAX_NUM, Result::INVALID_ARGUMENT, "'type' is invalid");
     NRI_RETURN_ON_FAILURE(this, textureDesc.format > Format::UNKNOWN && textureDesc.format < Format::MAX_NUM, Result::INVALID_ARGUMENT, "'format' is invalid");
     NRI_RETURN_ON_FAILURE(this, textureDesc.sharingMode < SharingMode::MAX_NUM, Result::INVALID_ARGUMENT, "'sharingMode' is invalid");
@@ -373,7 +396,7 @@ NRI_INLINE Result DeviceVal::CreateTexture(const TextureDesc& textureDesc, Textu
 
     texture = nullptr;
     if (result == Result::SUCCESS)
-        texture = (Texture*)Allocate<TextureVal>(GetAllocationCallbacks(), *this, textureImpl, false);
+        result = WrapImplementation<TextureVal>(texture, textureImpl, m_iCoreImpl.DestroyTexture, false);
 
     return result;
 }
@@ -412,7 +435,7 @@ NRI_INLINE Result DeviceVal::CreateDescriptor(const BufferViewDesc& bufferViewDe
     if (result == Result::SUCCESS) {
         auto bufferViewDescVal = bufferViewDesc;
         bufferViewDescVal.size = size;
-        bufferView = (Descriptor*)Allocate<DescriptorVal>(GetAllocationCallbacks(), *this, descriptorImpl, bufferViewDescVal);
+        result = WrapImplementation<DescriptorVal>(bufferView, descriptorImpl, m_iCoreImpl.DestroyDescriptor, bufferViewDescVal);
     }
 
     return result;
@@ -466,7 +489,7 @@ NRI_INLINE Result DeviceVal::CreateDescriptor(const TextureViewDesc& textureView
 
     textureView = nullptr;
     if (result == Result::SUCCESS)
-        textureView = (Descriptor*)Allocate<DescriptorVal>(GetAllocationCallbacks(), *this, descriptorImpl, textureViewDescFixed);
+        result = WrapImplementation<DescriptorVal>(textureView, descriptorImpl, m_iCoreImpl.DestroyDescriptor, textureViewDescFixed);
 
     return result;
 }
@@ -492,7 +515,7 @@ NRI_INLINE Result DeviceVal::CreateDescriptor(const SamplerDesc& samplerDesc, De
 
     sampler = nullptr;
     if (result == Result::SUCCESS)
-        sampler = (Descriptor*)Allocate<DescriptorVal>(GetAllocationCallbacks(), *this, samplerImpl, DescriptorType::SAMPLER);
+        result = WrapImplementation<DescriptorVal>(sampler, samplerImpl, m_iCoreImpl.DestroyDescriptor, DescriptorType::SAMPLER);
 
     return result;
 }
@@ -613,7 +636,7 @@ NRI_INLINE Result DeviceVal::CreatePipelineLayout(const PipelineLayoutDesc& pipe
 
     pipelineLayout = nullptr;
     if (result == Result::SUCCESS)
-        pipelineLayout = (PipelineLayout*)Allocate<PipelineLayoutVal>(GetAllocationCallbacks(), *this, pipelineLayoutImpl, pipelineLayoutDesc);
+        result = WrapImplementation<PipelineLayoutVal>(pipelineLayout, pipelineLayoutImpl, m_iCoreImpl.DestroyPipelineLayout, pipelineLayoutDesc);
 
     return result;
 }
@@ -712,10 +735,13 @@ NRI_INLINE Result DeviceVal::CreatePipeline(const GraphicsPipelineDesc& graphics
         NRI_RETURN_ON_FAILURE(this, graphicsPipelineDesc.vertexInput->streamNum == 0 || graphicsPipelineDesc.vertexInput->streams != nullptr, Result::INVALID_ARGUMENT, "'vertexInput->streams' is NULL");
         NRI_RETURN_ON_FAILURE(this, graphicsPipelineDesc.vertexInput->attributeNum <= GetDesc().shaderStage.vertex.attributeMaxNum, Result::INVALID_ARGUMENT, "'vertexInput->attributeNum' exceeds 'shaderStage.vertex.attributeMaxNum'");
 
-        for (uint32_t i = 0; i < graphicsPipelineDesc.vertexInput->attributeNum; i++)
+        for (uint32_t i = 0; i < graphicsPipelineDesc.vertexInput->attributeNum; i++) {
             NRI_RETURN_ON_FAILURE(this, graphicsPipelineDesc.vertexInput->attributes[i].format < Format::MAX_NUM, Result::INVALID_ARGUMENT, "'vertexInput->attributes[%u].format' is invalid", i);
+            NRI_RETURN_ON_FAILURE(this, graphicsPipelineDesc.vertexInput->attributes[i].streamIndex < graphicsPipelineDesc.vertexInput->streamNum, Result::INVALID_ARGUMENT, "'vertexInput->attributes[%u].streamIndex' must be < 'vertexInput->streamNum'", i);
+        }
 
         for (uint32_t i = 0; i < graphicsPipelineDesc.vertexInput->streamNum; i++) {
+            NRI_RETURN_ON_FAILURE(this, graphicsPipelineDesc.vertexInput->streams[i].bindingSlot < GetDesc().shaderStage.vertex.streamMaxNum, Result::INVALID_ARGUMENT, "'vertexInput->streams[%u].bindingSlot' must be < 'shaderStage.vertex.streamMaxNum'", i);
             NRI_RETURN_ON_FAILURE(this, graphicsPipelineDesc.vertexInput->streams[i].stepRate < VertexStreamStepRate::MAX_NUM, Result::INVALID_ARGUMENT, "'vertexInput->streams[%u].stepRate' is invalid", i);
             NRI_RETURN_ON_FAILURE(this, GetDesc().features.extendedDynamicState || graphicsPipelineDesc.vertexInput->streams[i].stride != 0, Result::INVALID_ARGUMENT, "'vertexInput->streams[%u].stride' is 0, but 'features.extendedDynamicState' is false", i);
         }
@@ -819,7 +845,7 @@ NRI_INLINE Result DeviceVal::CreatePipeline(const GraphicsPipelineDesc& graphics
 
     pipeline = nullptr;
     if (result == Result::SUCCESS)
-        pipeline = (Pipeline*)Allocate<PipelineVal>(GetAllocationCallbacks(), *this, pipelineImpl, graphicsPipelineDesc);
+        result = WrapImplementation<PipelineVal>(pipeline, pipelineImpl, m_iCoreImpl.DestroyPipeline, graphicsPipelineDesc);
 
     return result;
 }
@@ -852,7 +878,7 @@ NRI_INLINE Result DeviceVal::CreatePipeline(const ComputePipelineDesc& computePi
 
     pipeline = nullptr;
     if (result == Result::SUCCESS)
-        pipeline = (Pipeline*)Allocate<PipelineVal>(GetAllocationCallbacks(), *this, pipelineImpl, computePipelineDesc);
+        result = WrapImplementation<PipelineVal>(pipeline, pipelineImpl, m_iCoreImpl.DestroyPipeline, computePipelineDesc);
 
     return result;
 }
@@ -865,7 +891,7 @@ NRI_INLINE Result DeviceVal::CreatePipelineCache(const PipelineCacheDesc& pipeli
 
     pipelineCache = nullptr;
     if (result == Result::SUCCESS)
-        pipelineCache = (PipelineCache*)Allocate<PipelineCacheVal>(GetAllocationCallbacks(), *this, pipelineCacheImpl);
+        result = WrapImplementation<PipelineCacheVal>(pipelineCache, pipelineCacheImpl, m_iCoreImpl.DestroyPipelineCache);
 
     return result;
 }
@@ -898,18 +924,21 @@ NRI_INLINE Result DeviceVal::CreateQueryPool(const QueryPoolDesc& queryPoolDesc,
 
     queryPool = nullptr;
     if (result == Result::SUCCESS)
-        queryPool = (QueryPool*)Allocate<QueryPoolVal>(GetAllocationCallbacks(), *this, queryPoolImpl, queryPoolDesc.queryType, queryPoolDesc.capacity);
+        result = WrapImplementation<QueryPoolVal>(queryPool, queryPoolImpl, m_iCoreImpl.DestroyQueryPool, queryPoolDesc.queryType, queryPoolDesc.capacity);
 
     return result;
 }
 
-NRI_INLINE Result DeviceVal::CreateFence(uint64_t initialValue, Fence*& fence) {
+NRI_INLINE Result DeviceVal::CreateFence(const FenceDesc& fenceDesc, Fence*& fence) {
+    NRI_RETURN_ON_FAILURE(this, !fenceDesc.shared || GetDesc().features.sharedFences, Result::UNSUPPORTED, "'shared' fences are not supported by the device");
+
+    const uint64_t initialValue = fenceDesc.initialValue;
     Fence* fenceImpl = nullptr;
-    Result result = m_iCoreImpl.CreateFence(m_Impl, initialValue, fenceImpl);
+    Result result = m_iCoreImpl.CreateFence(m_Impl, fenceDesc, fenceImpl);
 
     fence = nullptr;
     if (result == Result::SUCCESS)
-        fence = (Fence*)Allocate<FenceVal>(GetAllocationCallbacks(), *this, fenceImpl, initialValue == SWAPCHAIN_SEMAPHORE);
+        result = WrapImplementation<FenceVal>(fence, fenceImpl, m_iCoreImpl.DestroyFence, initialValue == SWAPCHAIN_SEMAPHORE, fenceDesc.shared);
 
     return result;
 }
@@ -965,6 +994,8 @@ NRI_INLINE void DeviceVal::DestroyFence(Fence* fence) {
 }
 
 NRI_INLINE Result DeviceVal::CreateCommittedBuffer(MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer) {
+    NRI_RETURN_ON_FAILURE(this, !bufferDesc.shared || GetDesc().features.sharedResources, Result::UNSUPPORTED, "'shared' resources are not supported by the device");
+    NRI_RETURN_ON_FAILURE(this, !bufferDesc.shared || memoryLocation == MemoryLocation::DEVICE, Result::INVALID_ARGUMENT, "'shared' resources must be in 'DEVICE' memory");
     NRI_RETURN_ON_FAILURE(this, priority >= -1.0f && priority <= 1.0f, Result::INVALID_ARGUMENT, "'priority' outside of [-1; 1] range");
     NRI_RETURN_ON_FAILURE(this, bufferDesc.size != 0, Result::INVALID_ARGUMENT, "'size' is 0");
 
@@ -973,8 +1004,7 @@ NRI_INLINE Result DeviceVal::CreateCommittedBuffer(MemoryLocation memoryLocation
 
     buffer = nullptr;
     if (result == Result::SUCCESS)
-        buffer = (Buffer*)Allocate<BufferVal>(GetAllocationCallbacks(), *this, bufferImpl, true);
-
+        result = WrapImplementation<BufferVal>(buffer, bufferImpl, m_iCoreImpl.DestroyBuffer, true);
     if (buffer)
         ((BufferVal*)buffer)->SetMemoryLocation(memoryLocation);
 
@@ -982,6 +1012,8 @@ NRI_INLINE Result DeviceVal::CreateCommittedBuffer(MemoryLocation memoryLocation
 }
 
 NRI_INLINE Result DeviceVal::CreateCommittedTexture(MemoryLocation memoryLocation, float priority, const TextureDesc& textureDesc, Texture*& texture) {
+    NRI_RETURN_ON_FAILURE(this, !textureDesc.shared || GetDesc().features.sharedResources, Result::UNSUPPORTED, "'shared' resources are not supported by the device");
+    NRI_RETURN_ON_FAILURE(this, !textureDesc.shared || memoryLocation == MemoryLocation::DEVICE, Result::INVALID_ARGUMENT, "'shared' resources must be in 'DEVICE' memory");
     NRI_RETURN_ON_FAILURE(this, priority >= -1.0f && priority <= 1.0f, Result::INVALID_ARGUMENT, "'priority' outside of [-1; 1] range");
     NRI_RETURN_ON_FAILURE(this, textureDesc.type < TextureType::MAX_NUM, Result::INVALID_ARGUMENT, "'type' is invalid");
     NRI_RETURN_ON_FAILURE(this, textureDesc.format > Format::UNKNOWN && textureDesc.format < Format::MAX_NUM, Result::INVALID_ARGUMENT, "'format' is invalid");
@@ -1010,7 +1042,7 @@ NRI_INLINE Result DeviceVal::CreateCommittedTexture(MemoryLocation memoryLocatio
 
     texture = nullptr;
     if (result == Result::SUCCESS)
-        texture = (Texture*)Allocate<TextureVal>(GetAllocationCallbacks(), *this, textureImpl, true);
+        result = WrapImplementation<TextureVal>(texture, textureImpl, m_iCoreImpl.DestroyTexture, true);
 
     return result;
 }
@@ -1029,7 +1061,7 @@ NRI_INLINE Result DeviceVal::CreateCommittedMicromap(MemoryLocation memoryLocati
 
     micromap = nullptr;
     if (result == Result::SUCCESS)
-        micromap = (Micromap*)Allocate<MicromapVal>(GetAllocationCallbacks(), *this, micromapImpl, true);
+        result = WrapImplementation<MicromapVal>(micromap, micromapImpl, m_iRayTracingImpl.DestroyMicromap, true);
 
     return result;
 }
@@ -1087,12 +1119,13 @@ NRI_INLINE Result DeviceVal::CreateCommittedAccelerationStructure(MemoryLocation
 
     accelerationStructure = nullptr;
     if (result == Result::SUCCESS)
-        accelerationStructure = (AccelerationStructure*)Allocate<AccelerationStructureVal>(GetAllocationCallbacks(), *this, accelerationStructureImpl, true, &accelerationStructureDesc);
+        result = WrapImplementation<AccelerationStructureVal>(accelerationStructure, accelerationStructureImpl, m_iRayTracingImpl.DestroyAccelerationStructure, true, &accelerationStructureDesc);
 
     return result;
 }
 
 NRI_INLINE Result DeviceVal::CreatePlacedBuffer(Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer) {
+    NRI_RETURN_ON_FAILURE(this, !bufferDesc.shared, Result::INVALID_ARGUMENT, "'shared' buffers must be created with 'CreateCommittedBuffer'");
     NRI_RETURN_ON_FAILURE(this, bufferDesc.size != 0, Result::INVALID_ARGUMENT, "'size' is 0");
 
     if (memory) {
@@ -1120,8 +1153,7 @@ NRI_INLINE Result DeviceVal::CreatePlacedBuffer(Memory* memory, uint64_t offset,
 
     buffer = nullptr;
     if (result == Result::SUCCESS)
-        buffer = (Buffer*)Allocate<BufferVal>(GetAllocationCallbacks(), *this, bufferImpl, !memory);
-
+        result = WrapImplementation<BufferVal>(buffer, bufferImpl, m_iCoreImpl.DestroyBuffer, !memory);
     if (buffer && !memory)
         ((BufferVal*)buffer)->SetMemoryLocation((MemoryLocation)offset);
 
@@ -1135,6 +1167,7 @@ NRI_INLINE Result DeviceVal::CreatePlacedBuffer(Memory* memory, uint64_t offset,
 }
 
 NRI_INLINE Result DeviceVal::CreatePlacedTexture(Memory* memory, uint64_t offset, const TextureDesc& textureDesc, Texture*& texture) {
+    NRI_RETURN_ON_FAILURE(this, !textureDesc.shared, Result::INVALID_ARGUMENT, "'shared' textures must be created with 'CreateCommittedTexture'");
     NRI_RETURN_ON_FAILURE(this, textureDesc.type < TextureType::MAX_NUM, Result::INVALID_ARGUMENT, "'type' is invalid");
     NRI_RETURN_ON_FAILURE(this, textureDesc.format > Format::UNKNOWN && textureDesc.format < Format::MAX_NUM, Result::INVALID_ARGUMENT, "'format' is invalid");
     NRI_RETURN_ON_FAILURE(this, textureDesc.sharingMode < SharingMode::MAX_NUM, Result::INVALID_ARGUMENT, "'sharingMode' is invalid");
@@ -1182,7 +1215,7 @@ NRI_INLINE Result DeviceVal::CreatePlacedTexture(Memory* memory, uint64_t offset
 
     texture = nullptr;
     if (result == Result::SUCCESS)
-        texture = (Texture*)Allocate<TextureVal>(GetAllocationCallbacks(), *this, textureImpl, !memory);
+        result = WrapImplementation<TextureVal>(texture, textureImpl, m_iCoreImpl.DestroyTexture, !memory);
 
     // Update
     if (texture && memory) {
@@ -1226,7 +1259,7 @@ NRI_INLINE Result DeviceVal::CreatePlacedMicromap(Memory* memory, uint64_t offse
 
     micromap = nullptr;
     if (result == Result::SUCCESS)
-        micromap = (Micromap*)Allocate<MicromapVal>(GetAllocationCallbacks(), *this, micromapImpl, !memory);
+        result = WrapImplementation<MicromapVal>(micromap, micromapImpl, m_iRayTracingImpl.DestroyMicromap, !memory);
 
     // Update
     if (micromap && memory) {
@@ -1308,7 +1341,7 @@ NRI_INLINE Result DeviceVal::CreatePlacedAccelerationStructure(Memory* memory, u
 
     accelerationStructure = nullptr;
     if (result == Result::SUCCESS)
-        accelerationStructure = (AccelerationStructure*)Allocate<AccelerationStructureVal>(GetAllocationCallbacks(), *this, accelerationStructureImpl, !memory, &accelerationStructureDesc);
+        result = WrapImplementation<AccelerationStructureVal>(accelerationStructure, accelerationStructureImpl, m_iRayTracingImpl.DestroyAccelerationStructure, !memory, &accelerationStructureDesc);
 
     // Update
     if (accelerationStructure && memory) {
@@ -1341,7 +1374,7 @@ NRI_INLINE Result DeviceVal::AllocateMemory(const AllocateMemoryDesc& allocateMe
 
     memory = nullptr;
     if (result == Result::SUCCESS)
-        memory = (Memory*)Allocate<MemoryVal>(GetAllocationCallbacks(), *this, memoryImpl, allocateMemoryDesc.size, memoryLocation);
+        result = WrapImplementation<MemoryVal>(memory, memoryImpl, m_iCoreImpl.FreeMemory, allocateMemoryDesc.size, memoryLocation);
 
     return result;
 }
@@ -1480,7 +1513,7 @@ NRI_INLINE Result DeviceVal::CreateCommandAllocator(const CommandAllocatorVKDesc
 
     commandAllocator = nullptr;
     if (result == Result::SUCCESS)
-        commandAllocator = (CommandAllocator*)Allocate<CommandAllocatorVal>(GetAllocationCallbacks(), *this, commandAllocatorImpl, commandAllocatorVKDesc.queueType);
+        result = WrapImplementation<CommandAllocatorVal>(commandAllocator, commandAllocatorImpl, m_iCoreImpl.DestroyCommandAllocator, commandAllocatorVKDesc.queueType);
 
     return result;
 }
@@ -1494,7 +1527,7 @@ NRI_INLINE Result DeviceVal::CreateCommandBuffer(const CommandBufferVKDesc& comm
 
     commandBuffer = nullptr;
     if (result == Result::SUCCESS)
-        commandBuffer = (CommandBuffer*)Allocate<CommandBufferVal>(GetAllocationCallbacks(), *this, commandBufferImpl, commandBufferVKDesc.queueType, true);
+        result = WrapImplementation<CommandBufferVal>(commandBuffer, commandBufferImpl, m_iCoreImpl.DestroyCommandBuffer, commandBufferVKDesc.queueType, true);
 
     return result;
 }
@@ -1508,7 +1541,7 @@ NRI_INLINE Result DeviceVal::CreateDescriptorPool(const DescriptorPoolVKDesc& de
 
     descriptorPool = nullptr;
     if (result == Result::SUCCESS)
-        descriptorPool = (DescriptorPool*)Allocate<DescriptorPoolVal>(GetAllocationCallbacks(), *this, descriptorPoolImpl, descriptorPoolVKDesc.descriptorSetMaxNum);
+        result = WrapImplementation<DescriptorPoolVal>(descriptorPool, descriptorPoolImpl, m_iCoreImpl.DestroyDescriptorPool, descriptorPoolVKDesc.descriptorSetMaxNum);
 
     return result;
 }
@@ -1522,7 +1555,7 @@ NRI_INLINE Result DeviceVal::CreateBuffer(const BufferVKDesc& bufferVKDesc, Buff
 
     buffer = nullptr;
     if (result == Result::SUCCESS)
-        buffer = (Buffer*)Allocate<BufferVal>(GetAllocationCallbacks(), *this, bufferImpl, true);
+        result = WrapImplementation<BufferVal>(buffer, bufferImpl, m_iCoreImpl.DestroyBuffer, true);
 
     return result;
 }
@@ -1539,7 +1572,7 @@ NRI_INLINE Result DeviceVal::CreateTexture(const TextureVKDesc& textureVKDesc, T
 
     texture = nullptr;
     if (result == Result::SUCCESS)
-        texture = (Texture*)Allocate<TextureVal>(GetAllocationCallbacks(), *this, textureImpl, true);
+        result = WrapImplementation<TextureVal>(texture, textureImpl, m_iCoreImpl.DestroyTexture, true);
 
     return result;
 }
@@ -1553,7 +1586,7 @@ NRI_INLINE Result DeviceVal::CreateMemory(const MemoryVKDesc& memoryVKDesc, Memo
 
     memory = nullptr;
     if (result == Result::SUCCESS)
-        memory = (Memory*)Allocate<MemoryVal>(GetAllocationCallbacks(), *this, memoryImpl, memoryVKDesc.size, MemoryLocation::MAX_NUM);
+        result = WrapImplementation<MemoryVal>(memory, memoryImpl, m_iCoreImpl.FreeMemory, memoryVKDesc.size, MemoryLocation::MAX_NUM);
 
     return result;
 }
@@ -1566,7 +1599,7 @@ NRI_INLINE Result DeviceVal::CreatePipeline(const PipelineVKDesc& pipelineVKDesc
 
     pipeline = nullptr;
     if (result == Result::SUCCESS)
-        pipeline = (Pipeline*)Allocate<PipelineVal>(GetAllocationCallbacks(), *this, pipelineImpl);
+        result = WrapImplementation<PipelineVal>(pipeline, pipelineImpl, m_iCoreImpl.DestroyPipeline);
 
     return result;
 }
@@ -1580,7 +1613,7 @@ NRI_INLINE Result DeviceVal::CreateQueryPool(const QueryPoolVKDesc& queryPoolVKD
     queryPool = nullptr;
     if (result == Result::SUCCESS) {
         QueryType queryType = GetQueryTypeVK(queryPoolVKDesc.vkQueryType);
-        queryPool = (QueryPool*)Allocate<QueryPoolVal>(GetAllocationCallbacks(), *this, queryPoolImpl, queryType, 0);
+        result = WrapImplementation<QueryPoolVal>(queryPool, queryPoolImpl, m_iCoreImpl.DestroyQueryPool, queryType, 0);
     }
 
     return result;
@@ -1594,7 +1627,7 @@ NRI_INLINE Result DeviceVal::CreateFence(const FenceVKDesc& fenceVKDesc, Fence*&
 
     fence = nullptr;
     if (result == Result::SUCCESS)
-        fence = (Fence*)Allocate<FenceVal>(GetAllocationCallbacks(), *this, fenceImpl);
+        result = WrapImplementation<FenceVal>(fence, fenceImpl, m_iCoreImpl.DestroyFence);
 
     return result;
 }
@@ -1607,7 +1640,7 @@ NRI_INLINE Result DeviceVal::CreateAccelerationStructure(const AccelerationStruc
 
     accelerationStructure = nullptr;
     if (result == Result::SUCCESS)
-        accelerationStructure = (AccelerationStructure*)Allocate<AccelerationStructureVal>(GetAllocationCallbacks(), *this, accelerationStructureImpl, true);
+        result = WrapImplementation<AccelerationStructureVal>(accelerationStructure, accelerationStructureImpl, m_iRayTracingImpl.DestroyAccelerationStructure, true);
 
     return result;
 }
@@ -1624,7 +1657,7 @@ NRI_INLINE Result DeviceVal::CreateCommandBuffer(const CommandBufferD3D11Desc& c
 
     commandBuffer = nullptr;
     if (result == Result::SUCCESS)
-        commandBuffer = (CommandBuffer*)Allocate<CommandBufferVal>(GetAllocationCallbacks(), *this, commandBufferImpl, QueueType::GRAPHICS, true);
+        result = WrapImplementation<CommandBufferVal>(commandBuffer, commandBufferImpl, m_iCoreImpl.DestroyCommandBuffer, QueueType::GRAPHICS, true);
 
     return result;
 }
@@ -1637,7 +1670,7 @@ NRI_INLINE Result DeviceVal::CreateBuffer(const BufferD3D11Desc& bufferD3D11Desc
 
     buffer = nullptr;
     if (result == Result::SUCCESS)
-        buffer = (Buffer*)Allocate<BufferVal>(GetAllocationCallbacks(), *this, bufferImpl, true);
+        result = WrapImplementation<BufferVal>(buffer, bufferImpl, m_iCoreImpl.DestroyBuffer, true);
 
     return result;
 }
@@ -1650,7 +1683,7 @@ NRI_INLINE Result DeviceVal::CreateTexture(const TextureD3D11Desc& textureD3D11D
 
     texture = nullptr;
     if (result == Result::SUCCESS)
-        texture = (Texture*)Allocate<TextureVal>(GetAllocationCallbacks(), *this, textureImpl, true);
+        result = WrapImplementation<TextureVal>(texture, textureImpl, m_iCoreImpl.DestroyTexture, true);
 
     return result;
 }
@@ -1670,7 +1703,7 @@ NRI_INLINE Result DeviceVal::CreateCommandBuffer(const CommandBufferD3D12Desc& c
 
     commandBuffer = nullptr;
     if (result == Result::SUCCESS)
-        commandBuffer = (CommandBuffer*)Allocate<CommandBufferVal>(GetAllocationCallbacks(), *this, commandBufferImpl, queueType, true);
+        result = WrapImplementation<CommandBufferVal>(commandBuffer, commandBufferImpl, m_iCoreImpl.DestroyCommandBuffer, queueType, true);
 
     return result;
 }
@@ -1683,7 +1716,7 @@ NRI_INLINE Result DeviceVal::CreateDescriptorPool(const DescriptorPoolD3D12Desc&
 
     descriptorPool = nullptr;
     if (result == Result::SUCCESS)
-        descriptorPool = (DescriptorPool*)Allocate<DescriptorPoolVal>(GetAllocationCallbacks(), *this, descriptorPoolImpl, descriptorPoolD3D12Desc.descriptorSetMaxNum);
+        result = WrapImplementation<DescriptorPoolVal>(descriptorPool, descriptorPoolImpl, m_iCoreImpl.DestroyDescriptorPool, descriptorPoolD3D12Desc.descriptorSetMaxNum);
 
     return result;
 }
@@ -1696,7 +1729,7 @@ NRI_INLINE Result DeviceVal::CreateBuffer(const BufferD3D12Desc& bufferD3D12Desc
 
     buffer = nullptr;
     if (result == Result::SUCCESS)
-        buffer = (Buffer*)Allocate<BufferVal>(GetAllocationCallbacks(), *this, bufferImpl, true);
+        result = WrapImplementation<BufferVal>(buffer, bufferImpl, m_iCoreImpl.DestroyBuffer, true);
 
     return result;
 }
@@ -1709,7 +1742,7 @@ NRI_INLINE Result DeviceVal::CreateTexture(const TextureD3D12Desc& textureD3D12D
 
     texture = nullptr;
     if (result == Result::SUCCESS)
-        texture = (Texture*)Allocate<TextureVal>(GetAllocationCallbacks(), *this, textureImpl, true);
+        result = WrapImplementation<TextureVal>(texture, textureImpl, m_iCoreImpl.DestroyTexture, true);
 
     return result;
 }
@@ -1724,7 +1757,7 @@ NRI_INLINE Result DeviceVal::CreateMemory(const MemoryD3D12Desc& memoryD3D12Desc
 
     memory = nullptr;
     if (result == Result::SUCCESS)
-        memory = (Memory*)Allocate<MemoryVal>(GetAllocationCallbacks(), *this, memoryImpl, size, MemoryLocation::MAX_NUM);
+        result = WrapImplementation<MemoryVal>(memory, memoryImpl, m_iCoreImpl.FreeMemory, size, MemoryLocation::MAX_NUM);
 
     return result;
 }
@@ -1737,7 +1770,7 @@ NRI_INLINE Result DeviceVal::CreateFence(const FenceD3D12Desc& fenceD3D12Desc, F
 
     fence = nullptr;
     if (result == Result::SUCCESS)
-        fence = (Fence*)Allocate<FenceVal>(GetAllocationCallbacks(), *this, fenceImpl);
+        result = WrapImplementation<FenceVal>(fence, fenceImpl, m_iCoreImpl.DestroyFence);
 
     return result;
 }
@@ -1750,7 +1783,7 @@ NRI_INLINE Result DeviceVal::CreateAccelerationStructure(const AccelerationStruc
 
     accelerationStructure = nullptr;
     if (result == Result::SUCCESS)
-        accelerationStructure = (AccelerationStructure*)Allocate<AccelerationStructureVal>(GetAllocationCallbacks(), *this, accelerationStructureImpl, true);
+        result = WrapImplementation<AccelerationStructureVal>(accelerationStructure, accelerationStructureImpl, m_iRayTracingImpl.DestroyAccelerationStructure, true);
 
     return result;
 }
@@ -1769,7 +1802,7 @@ NRI_INLINE Result DeviceVal::CreateBuffer(const BufferMetalDesc& bufferMetalDesc
     buffer = nullptr;
 
     if (result == Result::SUCCESS)
-        buffer = (Buffer*)Allocate<BufferVal>(GetAllocationCallbacks(), *this, bufferImpl, true);
+        result = WrapImplementation<BufferVal>(buffer, bufferImpl, m_iCoreImpl.DestroyBuffer, true);
 
     return result;
 }
@@ -1789,7 +1822,7 @@ NRI_INLINE Result DeviceVal::CreateTexture(const TextureMetalDesc& textureMetalD
     texture = nullptr;
 
     if (result == Result::SUCCESS)
-        texture = (Texture*)Allocate<TextureVal>(GetAllocationCallbacks(), *this, textureImpl, true);
+        result = WrapImplementation<TextureVal>(texture, textureImpl, m_iCoreImpl.DestroyTexture, true);
 
     return result;
 }
@@ -1803,7 +1836,7 @@ NRI_INLINE Result DeviceVal::CreateFence(const FenceMetalDesc& fenceMetalDesc, F
     fence = nullptr;
 
     if (result == Result::SUCCESS)
-        fence = (Fence*)Allocate<FenceVal>(GetAllocationCallbacks(), *this, fenceImpl);
+        result = WrapImplementation<FenceVal>(fence, fenceImpl, m_iCoreImpl.DestroyFence);
 
     return result;
 }
@@ -1850,7 +1883,7 @@ NRI_INLINE Result DeviceVal::CreatePipeline(const RayTracingPipelineDesc& rayTra
 
     pipeline = nullptr;
     if (result == Result::SUCCESS)
-        pipeline = (Pipeline*)Allocate<PipelineVal>(GetAllocationCallbacks(), *this, pipelineImpl);
+        result = WrapImplementation<PipelineVal>(pipeline, pipelineImpl, m_iCoreImpl.DestroyPipeline);
 
     return result;
 }
@@ -1868,7 +1901,7 @@ NRI_INLINE Result DeviceVal::CreateMicromap(const MicromapDesc& micromapDesc, Mi
 
     micromap = nullptr;
     if (result == Result::SUCCESS)
-        micromap = (Micromap*)Allocate<MicromapVal>(GetAllocationCallbacks(), *this, micromapImpl, false);
+        result = WrapImplementation<MicromapVal>(micromap, micromapImpl, m_iRayTracingImpl.DestroyMicromap, false);
 
     return result;
 }
@@ -1925,7 +1958,7 @@ NRI_INLINE Result DeviceVal::CreateAccelerationStructure(const AccelerationStruc
 
     accelerationStructure = nullptr;
     if (result == Result::SUCCESS)
-        accelerationStructure = (AccelerationStructure*)Allocate<AccelerationStructureVal>(GetAllocationCallbacks(), *this, accelerationStructureImpl, false, &accelerationStructureDesc);
+        result = WrapImplementation<AccelerationStructureVal>(accelerationStructure, accelerationStructureImpl, m_iRayTracingImpl.DestroyAccelerationStructure, false, &accelerationStructureDesc);
 
     return result;
 }

@@ -15,6 +15,12 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+#    include <windows.h>
+#else
+#    include <unistd.h>
+#endif
+
 #if (NRI_ENABLE_D3D11_SUPPORT || NRI_ENABLE_D3D12_SUPPORT)
 #    include <dxgi1_6.h>
 #else
@@ -391,6 +397,26 @@ void* GetSharedLibraryFunction(Library& library, const char* name);
 void UnloadSharedLibrary(Library& library);
 
 // Helpers
+static inline void NRI_CALL DestroySharedHandle(SharedHandle& sharedHandle) {
+    switch (sharedHandle.type) {
+#ifdef _WIN32
+        case SharedHandleType::OPAQUE_WIN32:
+        case SharedHandleType::D3D12_RESOURCE:
+        case SharedHandleType::D3D12_FENCE:
+            CloseHandle((HANDLE)sharedHandle.handle);
+            break;
+#else
+        case SharedHandleType::OPAQUE_FD:
+            close((int)(intptr_t)sharedHandle.handle);
+            break;
+#endif
+        default:
+            break;
+    }
+
+    sharedHandle = {};
+}
+
 template <typename T>
 static inline T Align(T x, size_t alignment) {
     return (T)((size_t(x) + alignment - 1) & ~(alignment - 1));
@@ -471,6 +497,21 @@ static inline void Destroy(const AllocationCallbacks& allocationCallbacks, T* ob
         object->~T();
         allocationCallbacksCopy.Free(allocationCallbacksCopy.userArg, object);
     }
+}
+
+template <typename Implementation, typename Interface, typename... Args>
+[[nodiscard]] static inline Result CreateImplementation(const AllocationCallbacks& allocationCallbacks, Interface*& entity, Implementation* impl, Args&&... args) {
+    entity = nullptr;
+    if (!impl)
+        return Result::OUT_OF_MEMORY;
+
+    Result result = impl->Create(std::forward<Args>(args)...);
+    if (result != Result::SUCCESS)
+        Destroy(allocationCallbacks, impl);
+    else
+        entity = (Interface*)impl;
+
+    return result;
 }
 
 constexpr uint64_t MsToUs(uint32_t x) {
