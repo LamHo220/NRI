@@ -448,10 +448,10 @@ NriBits(FormatSupportBits, uint32_t,
 // https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html#d3d12_barrier_sync
 NriBits(StageBits, uint32_t,
     // Special
-    ALL                             = 0,            // Lazy default for barriers                          Shader stage
+    ALL                             = 0,            // Lazy default for barriers and "shaderStages"
     NONE                            = 0x7FFFFFFF,
 
-    // Graphics                                     // Invoked by "CmdDraw*"
+    // Graphics                                     // Invoked by "CmdDraw*"                              Shader stage
     INDEX_INPUT                     = NriBit(0),    //    Index buffer consumption
     VERTEX_SHADER                   = NriBit(1),    //    Vertex shader                                   X (required within GRAPHICS bind point)
     TESS_CONTROL_SHADER             = NriBit(2),    //    Tessellation control (hull) shader              X
@@ -515,6 +515,7 @@ NriBits(StageBits, uint32_t,
                                     | NriMember(StageBits, ANY_HIT_SHADER)
                                     | NriMember(StageBits, CALLABLE_SHADER),
 
+    // For descriptor and root visibility, "ALL" and "ALL_SHADERS" resolve to "PipelineLayoutDesc::shaderStages"
     ALL_SHADERS                     = NriMember(StageBits, GRAPHICS_SHADERS)
                                     | NriMember(StageBits, COMPUTE_SHADER)
                                     | NriMember(StageBits, RAY_TRACING_SHADERS),
@@ -991,8 +992,8 @@ NriStruct(TextureViewDesc) {
     NriOptional Nri(Format) format;         // inherits "TextureDesc::format" if "UNKNOWN"
     Nri(Dim_t) mipOffset;
     Nri(Dim_t) mipNum;                      // can be "REMAINING"
-    Nri(Dim_t) layerOffset;
-    Nri(Dim_t) layerNum;                    // can be "REMAINING"
+    Nri(Dim_t) layerOffset;                 // 0 for "TEXTURE_3D" (D3D11: must be 0 for "STORAGE_TEXTURE")
+    Nri(Dim_t) layerNum;                    // can be "REMAINING"; array views may expose 1 layer (6 for cube arrays)
     Nri(Dim_t) sliceOffset;
     Nri(Dim_t) sliceNum;                    // can be "REMAINING" (METAL: used only by "CmdClearStorage", shader views expose all slices, attachments use "sliceOffset")
     Nri(PlaneBits) planes;                  // accessible planes (missing planes are read-only for "DEPTH_STENCIL_ATTACHMENT" if "layout" is not provided, i.e. "UNDEFINED")

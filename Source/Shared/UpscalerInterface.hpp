@@ -88,16 +88,12 @@ constexpr size_t FFX_ALLOCATION_ALIGNMENT = 16;
 #    endif
 
 #    if NRI_ENABLE_VK_SUPPORT
-
-// Legacy SDK 1.1.4 Vulkan ABI, retained alongside the newer D3D12 headers
-#        define FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK 0x0000003u
-
-struct ffxCreateBackendVKDesc {
-    ffxCreateContextDescHeader header;
-    VkDevice vkDevice;
-    VkPhysicalDevice vkPhysicalDevice;
-    PFN_vkGetDeviceProcAddr vkDeviceProcAddr;
-};
+// The SDK reuses the DX12 callback type names with different Vulkan signatures
+#        define PfnFfxResourceAllocatorFunc PfnFfxResourceAllocatorFuncVK
+#        define PfnFfxResourceDeallocatorFunc PfnFfxResourceDeallocatorFuncVK
+#        include "vk/ffx_api_vk.h"
+#        undef PfnFfxResourceAllocatorFunc
+#        undef PfnFfxResourceDeallocatorFunc
 
 struct FfxVkPair {
     VkDevice device = VK_NULL_HANDLE;
@@ -130,11 +126,11 @@ struct Ffx {
     ffxAllocationCallbacks allocationCallbacks = {};
     ffxAllocationCallbacks* allocationCallbacksPtr = nullptr;
     ffxCreateContextDescUpscale contextDesc = {};
+    ffxCreateContextDescUpscaleVersion versionDesc = {};
     Lock* sdkLock = nullptr;
 
 #    if NRI_ENABLE_D3D12_SUPPORT
     ffxCreateBackendDX12Desc backendD3D12Desc = {};
-    ffxCreateContextDescUpscaleVersion versionDesc = {};
 #    endif
 
 #    if NRI_ENABLE_VK_SUPPORT
@@ -180,7 +176,7 @@ static inline void FfxUnregisterDevice(FfxVkPair& pair) {
 }
 
 static inline PFN_vkVoidFunction VKAPI_PTR FfxVkGetDeviceProcAddr(VkDevice device, const char* pName) {
-    // The legacy FFX Vulkan backend requests extension names for some core functions
+    // The FFX Vulkan backend requests extension names for some core functions
     if (!strcmp(pName, "vkGetBufferMemoryRequirements2KHR"))
         pName = "vkGetBufferMemoryRequirements2";
 
@@ -519,7 +515,7 @@ struct MetalFx {
 };
 
 static inline bool IsMetalFx(UpscalerType type) {
-    return type == UpscalerType::METALFX_SPATIAL || type == UpscalerType::METALFX_TEMPORAL || type == UpscalerType::METALFX_DENOISED;
+    return type == UpscalerType::METALFX_SPATIAL || type == UpscalerType::METALFX_TEMPORAL || type == UpscalerType::METALFX_DENOISER;
 }
 
 static inline MTL::Texture* MetalFxGetTexture(const CoreInterface& NRI, const UpscalerResource& resource) {
@@ -650,7 +646,7 @@ bool nri::IsMetalFxSupportedMetal(NS::Object* device, UpscalerType type) {
     if (type == UpscalerType::METALFX_TEMPORAL)
         return MTLFX::TemporalScalerDescriptor::supportsMetal4FX(deviceNative);
 
-    if (type == UpscalerType::METALFX_DENOISED)
+    if (type == UpscalerType::METALFX_DENOISER)
         return MTLFX::TemporalDenoisedScalerDescriptor::supportsMetal4FX(deviceNative);
 
     return true;
@@ -1083,7 +1079,7 @@ Result UpscalerImpl::Create(const UpscalerDesc& upscalerDesc) {
         ExclusiveScope lock(*m.ffx->sdkLock);
 
         // Load library
-        const char* libraryName = deviceDesc.graphicsAPI == GraphicsAPI::D3D12 ? "amd_fidelityfx_loader_dx12.dll" : "amd_fidelityfx_vk.dll";
+        const char* libraryName = deviceDesc.graphicsAPI == GraphicsAPI::D3D12 ? "amd_fidelityfx_loader_dx12.dll" : "amd_fidelityfx_loader_vk.dll";
         Library* ffxLibrary = LoadSharedLibrary(libraryName);
         if (!ffxLibrary)
             return Result::FAILURE;
@@ -1134,16 +1130,17 @@ Result UpscalerImpl::Create(const UpscalerDesc& upscalerDesc) {
         contextDesc.fpMessage = FfxDebugMessage;
 #    endif
 
+        ffxCreateContextDescUpscaleVersion& versionDesc = m.ffx->versionDesc;
+        versionDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION;
+        versionDesc.version = FFX_UPSCALER_VERSION;
+
 #    if NRI_ENABLE_D3D12_SUPPORT
         ffxCreateBackendDX12Desc& backendD3D12Desc = m.ffx->backendD3D12Desc;
-        ffxCreateContextDescUpscaleVersion& versionDesc = m.ffx->versionDesc;
 
         if (deviceDesc.graphicsAPI == GraphicsAPI::D3D12) {
             backendD3D12Desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
             backendD3D12Desc.device = (ID3D12Device*)m_iCore.GetDeviceNativeObject(&m_Device);
 
-            versionDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION;
-            versionDesc.version = FFX_UPSCALER_VERSION;
             backendD3D12Desc.header.pNext = &versionDesc.header;
             contextDesc.header.pNext = &backendD3D12Desc.header;
         }
@@ -1163,9 +1160,10 @@ Result UpscalerImpl::Create(const UpscalerDesc& upscalerDesc) {
             FfxRegisterDevice(m.ffx->vkPair, vkDevice, vkGetDeviceProcAddr);
 
             backendVKDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
-            backendVKDesc.vkDevice = vkDevice;
-            backendVKDesc.vkPhysicalDevice = vkPhysicalDevice;
-            backendVKDesc.vkDeviceProcAddr = FfxVkGetDeviceProcAddr;
+            backendVKDesc.deviceContext.vkDevice = vkDevice;
+            backendVKDesc.deviceContext.vkPhysicalDevice = vkPhysicalDevice;
+            backendVKDesc.deviceContext.vkDeviceProcAddr = FfxVkGetDeviceProcAddr;
+            backendVKDesc.header.pNext = &versionDesc.header;
 
             contextDesc.header.pNext = &backendVKDesc.header;
         }
@@ -1492,7 +1490,7 @@ Result UpscalerImpl::Create(const UpscalerDesc& upscalerDesc) {
 
             scaleMin = MTLFX::TemporalScalerDescriptor::supportedInputContentMinScale(deviceNative);
             scaleMax = MTLFX::TemporalScalerDescriptor::supportedInputContentMaxScale(deviceNative);
-        } else if (upscalerDesc.type == UpscalerType::METALFX_DENOISED) {
+        } else if (upscalerDesc.type == UpscalerType::METALFX_DENOISER) {
             scaleMin = MTLFX::TemporalDenoisedScalerDescriptor::supportedInputContentMinScale(deviceNative);
             scaleMax = MTLFX::TemporalDenoisedScalerDescriptor::supportedInputContentMaxScale(deviceNative);
         }
@@ -1551,7 +1549,7 @@ void UpscalerImpl::GetUpscalerProps(UpscalerProps& upscalerProps) const {
     if (m_Desc.type == UpscalerType::NIS || m_Desc.type == UpscalerType::METALFX_SPATIAL) {
         upscalerProps.renderResolutionMin.w = 0;
         upscalerProps.renderResolutionMin.h = 0;
-    } else if (m_Desc.type != UpscalerType::METALFX_DENOISED && (m_Desc.mode == UpscalerMode::ULTRA_QUALITY || m_Desc.mode == UpscalerMode::QUALITY || m_Desc.mode == UpscalerMode::BALANCED)) {
+    } else if (m_Desc.type != UpscalerType::METALFX_DENOISER && (m_Desc.mode == UpscalerMode::ULTRA_QUALITY || m_Desc.mode == UpscalerMode::QUALITY || m_Desc.mode == UpscalerMode::BALANCED)) {
         upscalerProps.renderResolutionMin.w = m_Desc.upscaleResolution.w / 2;
         upscalerProps.renderResolutionMin.h = m_Desc.upscaleResolution.h / 2;
     } else
