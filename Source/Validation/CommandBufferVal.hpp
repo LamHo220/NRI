@@ -108,7 +108,11 @@ static inline bool IsTextureLayoutSupported(const TextureDesc& textureDesc, Layo
     return true;
 }
 
-static inline bool IsDrawParametersEmulationEnabled(const PipelineLayoutDesc& pipelineLayoutDesc) {
+static inline bool IsDrawParametersEmulationEnabled(GraphicsAPI graphicsAPI, const PipelineLayoutDesc& pipelineLayoutDesc) {
+    // Emulation exists only in D3D12 and METAL, other backends use native draw parameters and their indirect records stay "Draw(Indexed)Desc"
+    if (graphicsAPI != GraphicsAPI::D3D12 && graphicsAPI != GraphicsAPI::METAL)
+        return false;
+
     return (pipelineLayoutDesc.flags & PipelineLayoutBits::ENABLE_DRAW_PARAMETERS_EMULATION) != 0 && (pipelineLayoutDesc.shaderStages & StageBits::VERTEX_SHADER) != 0;
 }
 
@@ -1030,7 +1034,7 @@ NRI_INLINE void CommandBufferVal::DrawIndirect(const Buffer& buffer, uint64_t of
     NRI_RETURN_ON_FAILURE(&m_Device, !countBuffer || deviceDesc.features.drawIndirectCount, ReturnVoid(), "'countBuffer' is not supported");
 
     const PipelineLayoutDesc& pipelineLayoutDesc = m_PipelineLayout->GetPipelineLayoutDesc();
-    bool enableDrawParametersEmulation = IsDrawParametersEmulationEnabled(pipelineLayoutDesc);
+    bool enableDrawParametersEmulation = IsDrawParametersEmulationEnabled(deviceDesc.graphicsAPI, pipelineLayoutDesc);
     uint32_t minStride = enableDrawParametersEmulation ? sizeof(DrawBaseDesc) : sizeof(DrawDesc);
     NRI_RETURN_ON_FAILURE(&m_Device, stride >= minStride, ReturnVoid(), "'stride' is too small, expected >= %u", minStride);
     NRI_RETURN_ON_FAILURE(&m_Device, (stride % 4) == 0, ReturnVoid(), "'stride' must be 4-byte aligned");
@@ -1050,7 +1054,7 @@ NRI_INLINE void CommandBufferVal::DrawIndexedIndirect(const Buffer& buffer, uint
     NRI_RETURN_ON_FAILURE(&m_Device, !countBuffer || deviceDesc.features.drawIndirectCount, ReturnVoid(), "'countBuffer' is not supported");
 
     const PipelineLayoutDesc& pipelineLayoutDesc = m_PipelineLayout->GetPipelineLayoutDesc();
-    bool enableDrawParametersEmulation = IsDrawParametersEmulationEnabled(pipelineLayoutDesc);
+    bool enableDrawParametersEmulation = IsDrawParametersEmulationEnabled(deviceDesc.graphicsAPI, pipelineLayoutDesc);
     uint32_t minStride = enableDrawParametersEmulation ? sizeof(DrawIndexedBaseDesc) : sizeof(DrawIndexedDesc);
     NRI_RETURN_ON_FAILURE(&m_Device, stride >= minStride, ReturnVoid(), "'stride' is too small, expected >= %u", minStride);
     NRI_RETURN_ON_FAILURE(&m_Device, (stride % 4) == 0, ReturnVoid(), "'stride' must be 4-byte aligned");
@@ -1173,12 +1177,16 @@ NRI_INLINE void CommandBufferVal::ZeroBuffer(Buffer& buffer, uint64_t offset, ui
     NRI_RETURN_ON_FAILURE(&m_Device, m_IsRecordingStarted, ReturnVoid(), "the command buffer must be in the recording state");
     NRI_RETURN_ON_FAILURE(&m_Device, !m_IsRenderPass, ReturnVoid(), "must be called outside of 'CmdBeginRendering/CmdEndRendering'");
 
+    const BufferDesc& bufferDesc = ((BufferVal&)buffer).GetDesc();
     if (size == WHOLE_SIZE) {
         NRI_RETURN_ON_FAILURE(&m_Device, offset == 0, ReturnVoid(), "'WHOLE_SIZE' is used but 'offset' is not 0");
     } else {
-        const BufferDesc& bufferDesc = ((BufferVal&)buffer).GetDesc();
         NRI_RETURN_ON_FAILURE(&m_Device, offset + size <= bufferDesc.size, ReturnVoid(), "'offset + size' > buffer.size");
     }
+
+    const uint64_t resolvedSize = size == WHOLE_SIZE ? bufferDesc.size : size;
+    NRI_RETURN_ON_FAILURE(&m_Device, IsAligned(offset, 4), ReturnVoid(), "'offset=%" PRIu64 "' must be 4-byte aligned", offset);
+    NRI_RETURN_ON_FAILURE(&m_Device, IsAligned(resolvedSize, 4), ReturnVoid(), "'resolved size=%" PRIu64 "' must be 4-byte aligned", resolvedSize);
 
     Buffer* bufferImpl = NRI_GET_IMPL(Buffer, &buffer);
 

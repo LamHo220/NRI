@@ -769,7 +769,7 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         if (!isWrapper) {
             ProcessInstanceExtensions(desiredInstanceExts);
 
-            res = CreateInstance(desc.enableGraphicsAPIValidation, desiredInstanceExts);
+            res = CreateInstance(desc.enableGraphicsAPIValidation, desiredInstanceExts, desc.vkInstanceCreateInfoNext);
             if (res != Result::SUCCESS)
                 return res;
         }
@@ -784,27 +784,23 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_PhysicalDevice = (VkPhysicalDevice)descVK.vkPhysicalDevice;
 
         if (!isWrapper) {
-            uint32_t deviceGroupNum = 0;
-            VkResult vkResult = m_VK.EnumeratePhysicalDeviceGroups(m_Instance, &deviceGroupNum, nullptr);
-            NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkEnumeratePhysicalDeviceGroups");
+            // Physical devices, not groups: a device is created on one physical device, and some overlay layers (RTSS) know only physical devices returned by "vkEnumeratePhysicalDevices"
+            uint32_t physicalDeviceNum = 0;
+            VkResult vkResult = m_VK.EnumeratePhysicalDevices(m_Instance, &physicalDeviceNum, nullptr);
+            NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkEnumeratePhysicalDevices");
 
-            Scratch<VkPhysicalDeviceGroupProperties> deviceGroups = NRI_ALLOCATE_SCRATCH(*this, VkPhysicalDeviceGroupProperties, deviceGroupNum);
-            for (uint32_t j = 0; j < deviceGroupNum; j++) {
-                deviceGroups[j].sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES;
-                deviceGroups[j].pNext = nullptr;
-            }
-
-            vkResult = m_VK.EnumeratePhysicalDeviceGroups(m_Instance, &deviceGroupNum, deviceGroups);
-            NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkEnumeratePhysicalDeviceGroups");
+            Scratch<VkPhysicalDevice> physicalDevices = NRI_ALLOCATE_SCRATCH(*this, VkPhysicalDevice, physicalDeviceNum);
+            vkResult = m_VK.EnumeratePhysicalDevices(m_Instance, &physicalDeviceNum, physicalDevices);
+            NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkEnumeratePhysicalDevices");
 
             uint32_t i = 0;
-            for (i = 0; i < deviceGroupNum; i++) {
+            for (i = 0; i < physicalDeviceNum; i++) {
                 VkPhysicalDeviceProperties2 props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
 
                 VkPhysicalDeviceIDProperties idProps = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
                 props.pNext = &idProps;
 
-                m_VK.GetPhysicalDeviceProperties2(deviceGroups[i].physicalDevices[0], &props);
+                m_VK.GetPhysicalDeviceProperties2(physicalDevices[i], &props);
 
                 uint32_t majorVersion = VK_API_VERSION_MAJOR(props.properties.apiVersion);
                 m_MinorVersion = std::min(VK_API_VERSION_MINOR(props.properties.apiVersion), VK_API_VERSION_MINOR(m_InstanceVersion));
@@ -820,12 +816,9 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
                     break;
             }
 
-            NRI_RETURN_ON_FAILURE(this, i != deviceGroupNum, Result::INVALID_ARGUMENT, "Can't create a device: physical device not found");
+            NRI_RETURN_ON_FAILURE(this, i != physicalDeviceNum, Result::INVALID_ARGUMENT, "Can't create a device: physical device not found");
 
-            if (deviceGroups[i].physicalDeviceCount > 1 && deviceGroups[i].subsetAllocation == VK_FALSE)
-                NRI_REPORT_WARNING(this, "The device group does not support memory allocation on a subset of the physical devices");
-
-            m_PhysicalDevice = deviceGroups[i].physicalDevices[0];
+            m_PhysicalDevice = physicalDevices[i];
         }
     }
 
@@ -1603,6 +1596,7 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_Desc.features.presentFromCompute = true;
         m_Desc.features.waitableSwapChain = m_Desc.features.swapChain != 0 && PresentIdFeatures.presentId != 0 && PresentWaitFeatures.presentWait != 0;
         m_Desc.features.resizableSwapChain = m_Desc.features.swapChain != 0 && m_IsSupported.swapChainMaintenance1 != 0;
+        m_Desc.features.latestReadySwapChain = m_Desc.features.swapChain != 0 && m_IsSupported.fifoLatestReady != 0;
         m_Desc.features.layerBasedMultiview = features11.multiview;
         m_Desc.features.textureCompressionBC = features.features.textureCompressionBC;
         m_Desc.features.textureCompressionETC2 = features.features.textureCompressionETC2;
@@ -1659,6 +1653,33 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_Desc.features.tessellationShader = features.features.tessellationShader != 0;
         m_Desc.features.geometryShader = features.features.geometryShader != 0;
         m_Desc.features.meshShader = MeshShaderFeatures.meshShader != 0 && MeshShaderFeatures.taskShader != 0;
+
+        // Remove unavailable shader stages from umbrella masks and explicit visibility masks.
+        if (!features.features.tessellationShader) {
+            m_SupportedShaderStages &= ~StageBits::TESSELLATION_SHADERS;
+            m_UnsupportedPipelineStages |= VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT | VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT;
+        }
+
+        if (!features.features.geometryShader) {
+            m_SupportedShaderStages &= ~StageBits::GEOMETRY_SHADER;
+            m_UnsupportedPipelineStages |= VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT;
+        }
+
+        if (!MeshShaderFeatures.taskShader) {
+            m_SupportedShaderStages &= ~StageBits::TASK_SHADER;
+            m_UnsupportedPipelineStages |= VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT;
+        }
+
+        if (!MeshShaderFeatures.meshShader) {
+            m_SupportedShaderStages &= ~StageBits::MESH_SHADER;
+            m_UnsupportedPipelineStages |= VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
+        }
+
+        if (!RayTracingPipelineFeatures.rayTracingPipeline) {
+            m_SupportedShaderStages &= ~StageBits::RAY_TRACING_SHADERS;
+            m_UnsupportedPipelineStages |= VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+        }
+
         m_Desc.features.lowLatency = m_IsSupported.presentId != 0 && IsExtensionSupported(VK_NV_LOW_LATENCY_2_EXTENSION_NAME, desiredDeviceExts);
         m_Desc.features.componentSwizzle = true;
         m_Desc.features.independentFrontAndBackStencilReferenceAndMasks = true;
@@ -2081,7 +2102,7 @@ void DeviceVK::GetMicromapBuildSizesInfo(const MicromapDesc& micromapDesc, VkMic
     vk.GetMicromapBuildSizesEXT(m_Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &sizesInfo);
 }
 
-Result DeviceVK::CreateInstance(bool enableGraphicsAPIValidation, const Vector<const char*>& desiredInstanceExts) {
+Result DeviceVK::CreateInstance(bool enableGraphicsAPIValidation, const Vector<const char*>& desiredInstanceExts, const void* instanceCreateInfoNext) {
     Vector<const char*> layers(GetStdAllocator());
     if (enableGraphicsAPIValidation)
         layers.push_back("VK_LAYER_KHRONOS_validation");
@@ -2133,6 +2154,9 @@ Result DeviceVK::CreateInstance(bool enableGraphicsAPIValidation, const Vector<c
 
     if (enableGraphicsAPIValidation)
         PNEXTCHAIN_APPEND_STRUCT(validationFeatures);
+
+    // Caller's structures go last
+    *_tail = instanceCreateInfoNext;
 
     vkResult = m_VK.CreateInstance(&instanceCreateInfo, m_AllocationCallbackPtr, &m_Instance);
     NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkCreateInstance");
@@ -2277,7 +2301,7 @@ Result DeviceVK::ResolveInstanceDispatchTable(const Vector<const char*>& desired
     GET_INSTANCE_FUNC(GetPhysicalDeviceExternalSemaphoreProperties);
     GET_INSTANCE_FUNC(CreateDevice);
     GET_INSTANCE_FUNC(GetDeviceQueue2);
-    GET_INSTANCE_FUNC(EnumeratePhysicalDeviceGroups);
+    GET_INSTANCE_FUNC(EnumeratePhysicalDevices);
     GET_INSTANCE_FUNC(GetPhysicalDeviceProperties2);
     GET_INSTANCE_FUNC(GetPhysicalDeviceFeatures2);
     GET_INSTANCE_FUNC(GetPhysicalDeviceQueueFamilyProperties2);
